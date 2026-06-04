@@ -117,3 +117,56 @@ qemu-riscv64-static -cpu "$CPU" \
 `TBB_PARTITIONER: STATIC` (confirming TBB threading), the OpenVINO build version
 (`2026.1`), and the achieved latency/throughput — confirming the cross-built CPU
 plugin runs the model end-to-end under emulation.
+
+## 5. Targeting a RISC-V CPU *without* XThead (still using TBB)
+
+The XThead requirement above is **only** an artefact of the prebuilt oneTBB
+package — the CPU plugin itself never emits XThead instructions. For a generic
+`rv64gc` core (with or without RVV) that lacks the T-Head custom extensions,
+replace the prebuilt TBB with one built for the baseline ISA. OpenVINO skips the
+prebuilt download whenever `TBB_DIR`/`TBBROOT` or `ENABLE_SYSTEM_TBB` is set
+(see `src/cmake/ov_parallel.cmake`).
+
+**Option A — build oneTBB from source (most portable).** The distro cross
+toolchain defaults to `rv64gc`, so the resulting `libtbb.so` carries no XThead
+instructions:
+
+```sh
+git clone --branch v2022.3.0 https://github.com/uxlfoundation/oneTBB.git
+cmake -G Ninja -S oneTBB -B oneTBB/build \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/riscv64.linux.toolchain.cmake \
+    -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_STRICT=OFF \
+    -DCMAKE_INSTALL_PREFIX=$PWD/onetbb-rv
+cmake --build oneTBB/build --parallel "$(nproc)" --target install
+```
+
+Then point the OpenVINO configure step at it (instead of relying on the
+download) and rebuild:
+
+```sh
+cmake ... -DTHREADING=TBB -DTBB_DIR=$PWD/onetbb-rv/lib/cmake/TBB ...
+```
+
+Because oneTBB keeps a stable `libtbb.so.12` ABI, an already-built tree can even
+be validated without recompiling OpenVINO by putting the clean library first on
+`LD_LIBRARY_PATH`. ResNet-50 then runs under a plain model with no XThead flags:
+
+```sh
+QEMU_LD_PREFIX=/usr/riscv64-linux-gnu \
+LD_LIBRARY_PATH=onetbb-rv/lib:install_riscv64/runtime/lib/riscv64 \
+qemu-riscv64-static -cpu rv64,v=true,vext_spec=v1.0 \
+    bin/riscv64/Release/benchmark_app -m resnet50.xml -d CPU -niter 1
+```
+
+**Option B — system TBB.** Install the distro `libtbb-dev` for the riscv64
+architecture (Debian/Ubuntu build it for baseline `rv64gc`) and configure with
+`-DENABLE_SYSTEM_TBB=ON`. On the host this needs multiarch:
+
+```sh
+dpkg --add-architecture riscv64 && apt-get update
+apt-get install -y libtbb-dev:riscv64
+cmake ... -DTHREADING=TBB -DENABLE_SYSTEM_TBB=ON ...
+```
+
+Either option keeps **TBB** as the threading backend while producing binaries
+that run on a plain `rv64gc` device — no XThead, no `SIGILL`.
