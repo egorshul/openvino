@@ -10,9 +10,9 @@
 | Whisper large v3 | `openai/whisper-large-v3` | FP16 IR, encoder со статичным mel-входом, stateful decoder с `beam_idx`. |
 | Llama 3.1 8B Instruct | `meta-llama/Llama-3.1-8B-Instruct` | **Stateful** FP16 IR с входом `beam_idx`; статическая компиляция — пайплайном GenAI NPU. |
 
-> **Готовите MLPerf Inference?** Используйте флаг `--mlperf` — см. раздел
-> [«MLPerf Inference»](#mlperf-inference-closed-datacenter) ниже. Важно: MLPerf
-> требует **greedy-декодирования, а не beam search**, и точных коммитов чекпойнтов.
+> **Готовите MLPerf Inference?** Идите по разделу **«Пошагово вручную»** ниже —
+> он уже выровнен под MLPerf (Closed/Datacenter). Важно: MLPerf требует
+> **greedy-декодирования, а не beam search**, и точных коммитов чекпойнтов.
 
 ## Версии (зафиксированы и совместимы)
 
@@ -47,38 +47,144 @@ pip install -r requirements.txt
   export HF_TOKEN=hf_xxx
   ```
 
-## Запуск
+## Пошагово вручную (без общего скрипта)
 
-Всё сразу + упаковка архива:
+Ниже — полный путь «руками», без `run_all.sh`, выровненный под **MLPerf Inference
+(Closed / Datacenter)**: пин коммитов чекпойнтов, FP16, **greedy** (без beam search).
+Все команды — из каталога `tools/npu_static_model_prep` при активированном venv.
 
-```bash
-./run_all.sh
-```
-
-Или по отдельности:
+### Шаг 1. Окружение
 
 ```bash
-# SDXL — полностью статический FP16
-python export_sdxl.py    --batch-size 1 --height 1024 --width 1024
-
-# Whisper large v3 — FP16; --num-beams фиксирует batch декодера статически
-python export_whisper.py --num-beams 5
-
-# Llama 3.1 8B — stateful FP16 (с beam_idx). Нужен HF_TOKEN.
-python export_llm.py     --weight-format fp16
+cd tools/npu_static_model_prep
+python -m venv .venv && source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+mkdir -p models
 ```
 
-Проверка форм и наличия `beam_idx`:
+### Шаг 2. HF-токен (нужен для gated Llama 3.1)
+
+Примите лицензию Meta на странице `meta-llama/Llama-3.1-8B-Instruct`, затем:
 
 ```bash
-python verify_static.py models/*-ov-*
+export HF_TOKEN=hf_xxx        # или: huggingface-cli login
 ```
 
-Упаковка в архив с манифестом и sha256:
+### Шаг 3. Запинить точные коммиты чекпойнтов
+
+У `optimum-cli` нет `--revision`, поэтому сначала скачиваем нужный коммит, а потом
+экспортируем из локального пути. `huggingface-cli download` печатает путь снапшота:
 
 ```bash
-./make_archive.sh models openvino-2026.1-npu-models-fp16.tar.gz
+LLAMA_DIR=$(huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
+    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1)
+
+WHISPER_DIR=$(huggingface-cli download openai/whisper-large-v3 \
+    --revision 06f233fe06e710322aca913c1bc4249a0d71fce1)
+
+echo "$LLAMA_DIR"; echo "$WHISPER_DIR"
 ```
+
+### Шаг 4. Экспорт Llama 3.1 8B → stateful FP16 IR
+
+```bash
+optimum-cli export openvino -m "$LLAMA_DIR" \
+    --task text-generation-with-past --weight-format fp16 \
+    models/llama-3.1-8b-instruct-ov-fp16
+```
+
+> Stateful-экспорт сохраняет вход `beam_idx`, но для MLPerf он **не используется**
+> (greedy). Полностью статические формы в IR causal-LM не запекаются — статику даёт
+> пайплайн GenAI NPU (Шаг 8).
+
+### Шаг 5. Экспорт Whisper large v3 → FP16 IR (greedy)
+
+```bash
+optimum-cli export openvino -m "$WHISPER_DIR" \
+    --task automatic-speech-recognition --weight-format fp16 \
+    models/whisper-large-v3-ov-fp16
+```
+
+> Для MLPerf **не** добавляйте reshape под лучи: декодирование greedy, аудио
+> паддится до 30 с (mel `[1,128,3000]`), `max_model_len=448`.
+
+### Шаг 6. Экспорт SDXL → полностью статический FP16 IR
+
+У SDXL reshape+half делаются через Python (CLI это не покрывает). Впишите коммит
+своего раунда в `REV` (в README MLCommons фиксированного хеша нет):
+
+```bash
+python - <<'PY'
+from optimum.intel import OVStableDiffusionXLPipeline
+MID = "stabilityai/stable-diffusion-xl-base-1.0"
+REV = None  # <- укажите коммит вашего MLPerf-раунда, напр. "462165..."
+kw = {"revision": REV} if REV else {}
+pipe = OVStableDiffusionXLPipeline.from_pretrained(MID, export=True, **kw)
+pipe.reshape(batch_size=1, height=1024, width=1024, num_images_per_prompt=1)  # MLPerf: 1024x1024
+pipe.half()                                                                   # FP16
+pipe.save_pretrained("models/sdxl-base-1.0-ov-fp16-static")
+print("saved")
+PY
+```
+
+### Шаг 7. Проверка форм (static / beam_idx)
+
+```bash
+python verify_static.py models/llama-3.1-8b-instruct-ov-fp16 \
+                        models/whisper-large-v3-ov-fp16 \
+                        models/sdxl-base-1.0-ov-fp16-static
+```
+
+Ожидаемо: SDXL — все суб-модели `static`; Llama/Whisper — основной граф остаётся
+`DYNAMIC` c `[has beam_idx]` (это нормально, статику обеспечит NPU-пайплайн);
+`*tokenizer*.xml` — `dynamic by design`.
+
+### Шаг 8. Упаковка архива
+
+```bash
+tar -czf openvino-2026.1-mlperf-models-fp16.tar.gz -C models .
+sha256sum openvino-2026.1-mlperf-models-fp16.tar.gz | tee openvino-2026.1-mlperf-models-fp16.tar.gz.sha256
+```
+
+### Шаг 9. Рантайм на NPU (greedy, MLPerf)
+
+```python
+import openvino_genai as ov_genai
+
+# Llama: статическая компиляция prefill/decode, greedy
+llm = ov_genai.LLMPipeline("models/llama-3.1-8b-instruct-ov-fp16", "NPU",
+                           MAX_PROMPT_LEN=1024, MIN_RESPONSE_LEN=256)
+cfg = llm.get_generation_config(); cfg.num_beams = 1; cfg.do_sample = False
+print(llm.generate("Summarize: ...", cfg))
+
+# Whisper: greedy, аудио 16 кГц, паддинг до 30 с
+asr = ov_genai.WhisperPipeline("models/whisper-large-v3-ov-fp16", "NPU")
+acfg = asr.get_generation_config(); acfg.num_beams = 1
+print(asr.generate(raw_audio_16k, acfg))
+```
+
+SDXL в рантайме (см. также вывод `export_sdxl.py --mlperf`): `EulerDiscreteScheduler`,
+`num_inference_steps=20`, `guidance_scale=8.0`, `1024x1024`, заданный negative prompt,
+latents с внешним сидом.
+
+---
+
+### Быстрый аналог через скрипты тулкита (необязательно)
+
+Те же шаги одной командой на модель (флаг `--mlperf` сам пинит коммиты и ставит
+greedy):
+
+```bash
+export HF_TOKEN=hf_xxx
+python export_llm.py     --mlperf
+python export_whisper.py --mlperf
+python export_sdxl.py    --mlperf --revision <commit_вашего_раунда>
+python verify_static.py  models/*-ov-*
+```
+
+> Без MLPerf (например, если хотите именно beam search на NPU): уберите `--mlperf`
+> и используйте `python export_whisper.py --num-beams 5`, а в рантайме — `num_beams>1`.
 
 ## Что именно означает «нет рантайм-динамизма» и «beam search входы»
 
@@ -107,6 +213,8 @@ python verify_static.py models/*-ov-*
   print(pipe.generate("Hello", cfg))
   ```
 
+  > Пример выше показывает beam search (`num_beams=5`) как возможность модели.
+  > **Для MLPerf ставьте `num_beams=1` (greedy)** — см. пошаговую инструкцию.
   > Для NPU обычно компрессуют веса (`--weight-format int4`/`int8`) — это меньше
   > и быстрее. Здесь по вашему требованию используется FP16; при необходимости
   > просто поменяйте флаг в `export_llm.py`.
@@ -129,38 +237,12 @@ python verify_static.py models/*-ov-*
   UNet при classifier-free guidance. Все суб-модели становятся полностью
   статическими (проверяется `verify_static.py`).
 
-## Точные команды экспорта (под капотом)
+## MLPerf Inference (Closed, Datacenter) — справка
 
-```bash
-# Llama 3.1 8B — stateful FP16 (beam_idx сохраняется)
-optimum-cli export openvino -m meta-llama/Llama-3.1-8B-Instruct \
-    --task text-generation-with-past --weight-format fp16 \
-    models/llama-3.1-8b-instruct-ov-fp16
+Пошаговая инструкция выше уже выровнена под MLPerf. Ниже — что именно делает
+выравнивание и reference-параметры; пресеты — в `mlperf_presets.py`.
 
-# Whisper large v3 — FP16
-optimum-cli export openvino -m openai/whisper-large-v3 \
-    --task automatic-speech-recognition --weight-format fp16 \
-    models/whisper-large-v3-ov-fp16
-
-# SDXL — экспорт + статический reshape + FP16 (через optimum API, см. export_sdxl.py)
-```
-
-## MLPerf Inference (Closed, Datacenter)
-
-Эти три модели — бенчмарки MLPerf Inference. Тулкит умеет выравнивать аргументы
-под reference-реализации MLCommons. Включается флагом `--mlperf` (или `MLPERF=1
-./run_all.sh`); пресеты в `mlperf_presets.py`.
-
-```bash
-export HF_TOKEN=hf_xxx
-MLPERF=1 ./run_all.sh
-# или поштучно:
-python export_llm.py     --mlperf
-python export_whisper.py --mlperf
-python export_sdxl.py    --mlperf --revision <commit_вашего_раунда>
-```
-
-Что делает `--mlperf`:
+Что делает выравнивание (флаг `--mlperf` в скриптах или ручные Шаги 3–6):
 
 * **Пинит точный коммит чекпойнта** (snapshot-download → экспорт из локального пути,
   т.к. у `optimum-cli` нет `--revision`):
