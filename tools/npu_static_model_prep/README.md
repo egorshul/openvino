@@ -10,6 +10,10 @@
 | Whisper large v3 | `openai/whisper-large-v3` | FP16 IR, encoder со статичным mel-входом, stateful decoder с `beam_idx`. |
 | Llama 3.1 8B Instruct | `meta-llama/Llama-3.1-8B-Instruct` | **Stateful** FP16 IR с входом `beam_idx`; статическая компиляция — пайплайном GenAI NPU. |
 
+> **Готовите MLPerf Inference?** Используйте флаг `--mlperf` — см. раздел
+> [«MLPerf Inference»](#mlperf-inference-closed-datacenter) ниже. Важно: MLPerf
+> требует **greedy-декодирования, а не beam search**, и точных коммитов чекпойнтов.
+
 ## Версии (зафиксированы и совместимы)
 
 ```
@@ -140,6 +144,54 @@ optimum-cli export openvino -m openai/whisper-large-v3 \
 
 # SDXL — экспорт + статический reshape + FP16 (через optimum API, см. export_sdxl.py)
 ```
+
+## MLPerf Inference (Closed, Datacenter)
+
+Эти три модели — бенчмарки MLPerf Inference. Тулкит умеет выравнивать аргументы
+под reference-реализации MLCommons. Включается флагом `--mlperf` (или `MLPERF=1
+./run_all.sh`); пресеты в `mlperf_presets.py`.
+
+```bash
+export HF_TOKEN=hf_xxx
+MLPERF=1 ./run_all.sh
+# или поштучно:
+python export_llm.py     --mlperf
+python export_whisper.py --mlperf
+python export_sdxl.py    --mlperf --revision <commit_вашего_раунда>
+```
+
+Что делает `--mlperf`:
+
+* **Пинит точный коммит чекпойнта** (snapshot-download → экспорт из локального пути,
+  т.к. у `optimum-cli` нет `--revision`):
+  * Llama 3.1 8B — `be673f326cab4cd22ccfef76109faf68e41aa5f1`
+  * Whisper v3 — `06f233fe06e710322aca913c1bc4249a0d71fce1`
+  * SDXL — reference снапшотит HF-пайплайн; зафиксируйте коммит своего раунда через
+    `--revision` (в README MLCommons фиксированного хеша нет).
+* **Нацеливает на GREEDY** (это критично для Closed): `num_beams=1`,
+  `do_sample=False`. У Whisper `--num-beams` принудительно игнорируется. Вход
+  `beam_idx` остаётся в IR, но **не используется** — модель валидна.
+
+Reference-параметры MLPerf (из исходников MLCommons):
+
+| Модель | Декодирование | Длины / рантайм | Точность (Datacenter) |
+|---|---|---|---|
+| Llama 3.1 8B | greedy, bf16 reference | вход паддинг до 1024 ток. | ROUGE1≥38.78, R2≥15.91, RL≥24.50, RLsum≥35.79, gen_len 90% (99% порог) |
+| Whisper v3 | greedy, `temperature=0`, `max_new_tokens=200` | 30 c аудио, mel 128×3000, `max_model_len=448` | WER ≤ 2.0671% / 99% от reference |
+| SDXL | EulerDiscreteScheduler, 20 шагов, guidance=8, 1024×1024, заданный negative prompt, latents с внешним сидом | fp32 reference (fp16/bf16 ок) | FID∈[23.011, 23.950], CLIP∈[31.686, 31.813] |
+
+### Что НЕ закрывает тулкит (нужно для валидного Closed-сабмишна)
+* **LoadGen-харнес** и сценарии (Offline/Server), `user.conf`, equal-issue.
+* **Официальные датасеты** (CNN/DailyMail, LibriSpeech, COCO-2014) и препроцессинг.
+* **Accuracy-скрипты** MLPerf (ROUGE / WER / FID+CLIP) и калибровочный датасет (если
+  квантуете — для Datacenter quantization разрешён с калибровкой по правилам).
+* **Проверка точности FP16**: reference у Llama — bf16; FP16-веса допустимы как
+  оптимизация, но обязаны держать 99% порог. Если не проходит — берите bf16/int8
+  с калибровкой.
+
+> Источники: MLCommons inference (`language/llama3.1-8b`, `speech2text`,
+> `text_to_image`, `backend_pytorch.py`) и `inference_policies/inference_rules.adoc`.
+> Пороги/коммиты меняются по раундам — сверяйтесь с правилами своего раунда.
 
 ## Замечания
 * `--stateless` в `export_llm.py` добавляет `--disable-stateful` (явные

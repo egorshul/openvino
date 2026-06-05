@@ -59,6 +59,22 @@ def run_optimum_export(args: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+def resolve_model_source(model_id: str, revision: str | None) -> str:
+    """Return a -m argument for optimum-cli.
+
+    optimum-cli has no --revision flag, so to pin an exact MLPerf checkpoint
+    commit we snapshot-download that revision locally and export from the path.
+    Without a revision the HF id is passed through (resolves to the latest main).
+    """
+    if not revision:
+        return model_id
+    from huggingface_hub import snapshot_download
+
+    log(f"pinning {model_id} @ {revision[:12]} (snapshot download)")
+    local = snapshot_download(repo_id=model_id, revision=revision)
+    return local
+
+
 def report_shapes(xml_path: Path) -> tuple[list[str], list[str]]:
     """Return (input descriptions, names of inputs that still have dynamic dims)."""
     model = ov.Core().read_model(xml_path)

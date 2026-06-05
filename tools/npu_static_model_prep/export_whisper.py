@@ -26,17 +26,37 @@ def main() -> None:
     p.add_argument("--model-id", default="openai/whisper-large-v3")
     p.add_argument("--output", type=Path, default=Path("models/whisper-large-v3-ov-fp16"))
     p.add_argument("--weight-format", default="fp16", choices=["fp16", "fp32", "int8"])
+    p.add_argument("--revision", default=None,
+                   help="Pin an exact checkpoint commit (snapshot-downloaded, then exported).")
+    p.add_argument("--mlperf", action="store_true",
+                   help="Align to the MLPerf Inference reference: pin the reference commit and "
+                        "target GREEDY decoding (num_beams=1, NO beam reshape).")
     p.add_argument("--num-beams", type=int, default=0,
-                   help="If >0, statically reshape the decoder batch to this many beams "
-                        "(fixes the beam dimension so no runtime dynamism is needed).")
+                   help="If >0, statically reshape the decoder batch to this many beams. "
+                        "Leave 0 for greedy. NOTE: MLPerf uses greedy, so do NOT set this for "
+                        "a Closed submission.")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
+
+    preset = None
+    if args.mlperf:
+        from mlperf_presets import MLPERF
+        preset = MLPERF["whisper-large-v3"]
+        args.model_id = preset["model_id"]
+        args.revision = args.revision or preset["revision"]
+        if args.num_beams:
+            common.log("MLPerf mode: forcing greedy (ignoring --num-beams; reference is greedy).")
+            args.num_beams = 0
+        a = preset["audio"]
+        common.log(f"MLPerf mode: pin {args.model_id} @ {args.revision[:12]}, GREEDY, "
+                   f"{a['chunk_seconds']}s audio -> mel {a['n_mels']}x{a['mel_frames']}, "
+                   f"max_model_len={a['max_model_len']}.")
 
     common.check_openvino_version()
     common.ensure_clean_outdir(args.output, args.overwrite)
 
     common.run_optimum_export([
-        "-m", args.model_id,
+        "-m", common.resolve_model_source(args.model_id, args.revision),
         "--task", "automatic-speech-recognition",
         "--weight-format", args.weight_format,
         str(args.output),
@@ -53,9 +73,14 @@ def main() -> None:
     if dec_xml.exists() and common.has_input(dec_xml, "beam_idx"):
         common.log("OK: decoder 'beam_idx' input present -> model accepts beam-search inputs.")
     common.log(
-        "Reminder: run on NPU via openvino_genai.WhisperPipeline(path, 'NPU'); "
-        "set num_beams in WhisperGenerationConfig for beam search."
+        "Reminder: run on NPU via openvino_genai.WhisperPipeline(path, 'NPU')."
     )
+    if preset:
+        common.log(
+            "MLPerf (Closed): generation must be GREEDY (num_beams=1, temperature=0, "
+            f"max_new_tokens={preset['decoding']['max_new_tokens']}); pad audio to 30s. "
+            f"Validate WER <= {preset['accuracy_target']['wer_pct']}% / 99% of reference."
+        )
 
 
 def _reshape_static(out: Path, num_beams: int) -> None:

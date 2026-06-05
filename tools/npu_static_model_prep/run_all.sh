@@ -16,17 +16,22 @@ cd "$(dirname "$0")"
 OUT_ROOT="${OUT_ROOT:-models}"
 mkdir -p "$OUT_ROOT"
 
+# Set MLPERF=1 to align to the MLPerf Inference Closed/Datacenter reference
+# (pinned checkpoint commits + GREEDY decoding, no beam search).
+MLP="${MLPERF:+--mlperf}"
+[[ -n "$MLP" ]] && echo "### MLPerf alignment ENABLED (pinned commits + greedy)"
+
 echo "### 1/3  Stable Diffusion XL (fully static FP16)"
-python export_sdxl.py    --output "$OUT_ROOT/sdxl-base-1.0-ov-fp16-static" --overwrite
+python export_sdxl.py    $MLP --output "$OUT_ROOT/sdxl-base-1.0-ov-fp16-static" --overwrite
 
 echo "### 2/3  Whisper large v3 (FP16, beam_idx)"
-python export_whisper.py --output "$OUT_ROOT/whisper-large-v3-ov-fp16"     --overwrite
+python export_whisper.py $MLP --output "$OUT_ROOT/whisper-large-v3-ov-fp16"     --overwrite
 
 echo "### 3/3  Llama 3.1 8B Instruct (stateful FP16, beam_idx)"
 if [[ -z "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}" ]]; then
   echo ">>> HF_TOKEN not set: skipping gated Llama. Set it and re-run export_llm.py."
 else
-  python export_llm.py   --output "$OUT_ROOT/llama-3.1-8b-instruct-ov-fp16" --overwrite
+  python export_llm.py   $MLP --output "$OUT_ROOT/llama-3.1-8b-instruct-ov-fp16" --overwrite
 fi
 
 echo "### Verifying shapes"

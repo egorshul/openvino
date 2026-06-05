@@ -35,6 +35,11 @@ def main() -> None:
     p.add_argument("--output", type=Path, default=Path("models/llama-3.1-8b-instruct-ov-fp16"))
     p.add_argument("--weight-format", default="fp16", choices=["fp16", "fp32", "int8", "int4"],
                    help="FP16 per request; int4/int8 are common for NPU LLMs (smaller, faster).")
+    p.add_argument("--revision", default=None,
+                   help="Pin an exact checkpoint commit (snapshot-downloaded, then exported).")
+    p.add_argument("--mlperf", action="store_true",
+                   help="Align to the MLPerf Inference (Closed/Datacenter) reference: pin the "
+                        "reference commit and target GREEDY decoding (num_beams=1, no beam search).")
     p.add_argument("--stateless", action="store_true",
                    help="Add --disable-stateful: emit explicit past/present KV I/O instead of a "
                         "stateful model. Use only if your runtime cannot consume stateful models. "
@@ -43,12 +48,22 @@ def main() -> None:
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
 
+    preset = None
+    if args.mlperf:
+        from mlperf_presets import MLPERF
+        preset = MLPERF["llama3.1-8b"]
+        args.model_id = preset["model_id"]
+        args.revision = args.revision or preset["revision"]
+        common.log(f"MLPerf mode: pin {args.model_id} @ {args.revision[:12]}, "
+                   f"GREEDY decoding, max_prompt_len={preset['max_prompt_len']}")
+
     common.check_openvino_version()
     common.require_hf_token_for_gated(args.model_id)
     common.ensure_clean_outdir(args.output, args.overwrite)
 
+    source = common.resolve_model_source(args.model_id, args.revision)
     export_args = [
-        "-m", args.model_id,
+        "-m", source,
         "--task", "text-generation-with-past",
         "--weight-format", args.weight_format,
     ]
@@ -76,6 +91,12 @@ def main() -> None:
         "Reminder: run this IR on NPU via openvino_genai.LLMPipeline(path, 'NPU', "
         "MAX_PROMPT_LEN=..., MIN_RESPONSE_LEN=...) for static (dynamism-free) compilation."
     )
+    if preset:
+        common.log(
+            "MLPerf (Closed): set generation to GREEDY -> num_beams=1, do_sample=False "
+            f"(beam_idx stays in the IR but is unused); MAX_PROMPT_LEN >= {preset['max_prompt_len']}. "
+            "Validate ROUGE >= 99% targets; FP16 must still meet them (reference is bf16)."
+        )
 
 
 if __name__ == "__main__":

@@ -27,8 +27,25 @@ def main() -> None:
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
     p.add_argument("--num-images-per-prompt", type=int, default=1)
+    p.add_argument("--revision", default=None,
+                   help="Pin an exact checkpoint commit/revision for the SDXL pipeline.")
+    p.add_argument("--mlperf", action="store_true",
+                   help="Align to the MLPerf Inference reference: 1024x1024 and print the exact "
+                        "runtime diffusion settings (scheduler/steps/guidance) to use.")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args()
+
+    preset = None
+    if args.mlperf:
+        from mlperf_presets import MLPERF
+        preset = MLPERF["sdxl"]
+        args.model_id = preset["model_id"]
+        args.revision = args.revision or preset["revision"]
+        rt = preset["runtime"]
+        args.height, args.width = rt["height"], rt["width"]
+        if not args.revision:
+            common.log("MLPerf mode: NOTE set --revision to your round's mandated SDXL commit "
+                       "(README has no fixed hash; the reference snapshots the HF pipeline).")
 
     common.check_openvino_version()
     common.ensure_clean_outdir(args.output, args.overwrite)
@@ -36,7 +53,8 @@ def main() -> None:
     from optimum.intel import OVStableDiffusionXLPipeline
 
     common.log(f"exporting {args.model_id} (this downloads ~7 GB and converts each sub-model)")
-    pipe = OVStableDiffusionXLPipeline.from_pretrained(args.model_id, export=True)
+    kwargs = {"revision": args.revision} if args.revision else {}
+    pipe = OVStableDiffusionXLPipeline.from_pretrained(args.model_id, export=True, **kwargs)
 
     common.log(
         f"reshaping to static: batch={args.batch_size}, {args.height}x{args.width}, "
@@ -53,6 +71,16 @@ def main() -> None:
 
     common.log(f"saved -> {args.output} ({common.archive_dir(args.output)} MiB)")
     _report_static(args.output)
+
+    if preset:
+        rt = preset["runtime"]
+        common.log("MLPerf (Closed) runtime settings to match the reference exactly:")
+        common.log(f"    scheduler={rt['scheduler']}, num_inference_steps={rt['num_inference_steps']}, "
+                   f"guidance_scale={rt['guidance_scale']}, {rt['height']}x{rt['width']}")
+        common.log(f"    negative_prompt={rt['negative_prompt']!r}")
+        common.log(f"    latents: {rt['latents']}")
+        b = preset["accuracy_bounds"]
+        common.log(f"    accuracy bounds (confirm vs round): FID {b['FID']}, CLIP {b['CLIP']}")
 
 
 def _report_static(out: Path) -> None:
