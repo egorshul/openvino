@@ -91,17 +91,46 @@ huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
 
 У `optimum-cli` нет `--revision`, поэтому сначала скачиваем нужный коммит, а потом
 экспортируем из локального пути. `huggingface-cli download` печатает путь снапшота.
-**Для gated Llama обязателен `--token`:**
+
+> **Важно — фильтруйте файлы, иначе скачается лишнее и будет «висеть».**
+> В этих репозиториях лежат дубликаты весов во всех форматах:
+> * `openai/whisper-large-v3` — **24.7 GB** целиком (flax `.msgpack` 6 GB, fp32-шарды
+>   ~12 GB, `pytorch_model.bin` 3 GB). Нужен только `model.safetensors` (~3.1 GB).
+> * `meta-llama/Llama-3.1-8B-Instruct` — есть папка `original/` с `consolidated.*.pth`
+>   (~16 GB дубль). Исключайте её.
+>
+> Также прогресс-бар не виден, когда команда внутри `$(...)`. Запустите скачивание
+> **обычной командой** (увидите прогресс), а путь подхватите повторным вызовом —
+> он мгновенный из кэша.
+
+```bash
+# Llama: только safetensors + конфиги/токенайзер (без original/*)
+huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
+    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1 --token "$HF_TOKEN" \
+    --exclude "original/*"
+
+# Whisper: только нужный fp16-чекпойнт (~3.1 GB вместо 24.7 GB)
+huggingface-cli download openai/whisper-large-v3 \
+    --revision 06f233fe06e710322aca913c1bc4249a0d71fce1 \
+    --include config.json generation_config.json preprocessor_config.json \
+              tokenizer.json tokenizer_config.json vocab.json merges.txt \
+              normalizer.json added_tokens.json special_tokens_map.json \
+              model.safetensors
+```
+
+Теперь подхватите локальные пути (мгновенно, из кэша):
 
 ```bash
 LLAMA_DIR=$(huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
-    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1 --token "$HF_TOKEN")
-
+    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1 --token "$HF_TOKEN" --exclude "original/*")
 WHISPER_DIR=$(huggingface-cli download openai/whisper-large-v3 \
-    --revision 06f233fe06e710322aca913c1bc4249a0d71fce1)
-
+    --revision 06f233fe06e710322aca913c1bc4249a0d71fce1 --include model.safetensors config.json)
 echo "$LLAMA_DIR"; echo "$WHISPER_DIR"
 ```
+
+> Если скачивание всё равно подвисает на медленной сети — попробуйте отключить Xet
+> (`export HF_HUB_DISABLE_XET=1`) или ускорить (`pip install hf_transfer &&
+> export HF_HUB_ENABLE_HF_TRANSFER=1`).
 
 **Альтернатива для Llama — официальный способ MLPerf** (git + LFS, если CLI капризничает):
 
