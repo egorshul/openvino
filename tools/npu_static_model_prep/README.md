@@ -65,26 +65,55 @@ mkdir -p models
 
 ### Шаг 2. HF-токен (нужен для gated Llama 3.1)
 
-Примите лицензию Meta на странице `meta-llama/Llama-3.1-8B-Instruct`, затем:
+1. На странице `https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct` запросите
+   доступ и дождитесь статуса **"You have been granted access"** (а не "pending").
+2. Залогиньтесь — для gated-репозиториев это надёжнее env-переменной:
 
 ```bash
-export HF_TOKEN=hf_xxx        # или: huggingface-cli login
+huggingface-cli login          # вставьте токен с правом Read
+huggingface-cli whoami         # должно показать ваш логин
+export HF_TOKEN=hf_xxx          # дополнительно, чтобы токен видели скрипты
 ```
+
+3. Быстрая проверка доступа (качает один файл):
+
+```bash
+huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
+    --revision main --include config.json --token "$HF_TOKEN"
+```
+
+> Если здесь видите **`Revision Not Found` / 404 / Gated** — это **не про коммит**, а
+> про доступ: HF отвечает на gated-репозиторий без авторизации именно 404 по
+> эндпоинту ревизии. Проверьте, что лицензия одобрена и токен передаётся
+> (`--token "$HF_TOKEN"`). Коммит `be673f3…` — корректный, его предписывает MLPerf.
 
 ### Шаг 3. Запинить точные коммиты чекпойнтов
 
 У `optimum-cli` нет `--revision`, поэтому сначала скачиваем нужный коммит, а потом
-экспортируем из локального пути. `huggingface-cli download` печатает путь снапшота:
+экспортируем из локального пути. `huggingface-cli download` печатает путь снапшота.
+**Для gated Llama обязателен `--token`:**
 
 ```bash
 LLAMA_DIR=$(huggingface-cli download meta-llama/Llama-3.1-8B-Instruct \
-    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1)
+    --revision be673f326cab4cd22ccfef76109faf68e41aa5f1 --token "$HF_TOKEN")
 
 WHISPER_DIR=$(huggingface-cli download openai/whisper-large-v3 \
     --revision 06f233fe06e710322aca913c1bc4249a0d71fce1)
 
 echo "$LLAMA_DIR"; echo "$WHISPER_DIR"
 ```
+
+**Альтернатива для Llama — официальный способ MLPerf** (git + LFS, если CLI капризничает):
+
+```bash
+git lfs install
+GIT_LFS_SKIP_SMUDGE=0 git clone https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
+cd Llama-3.1-8B-Instruct && git checkout be673f326cab4cd22ccfef76109faf68e41aa5f1 && cd ..
+LLAMA_DIR="$PWD/Llama-3.1-8B-Instruct"
+```
+
+> Члены MLCommons могут взять чекпойнт из R2-хранилища:
+> `mlcr get,ml-model,llama3,_mlc,_8b,_r2-downloader --outdirname=<path> -j`.
 
 ### Шаг 4. Экспорт Llama 3.1 8B → stateful FP16 IR
 
