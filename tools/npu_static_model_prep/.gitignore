@@ -1,0 +1,7 @@
+# Produced artifacts and local environment — never commit multi-GB weights.
+models/
+*.tar.gz
+*.tar.gz.sha256
+.venv/
+__pycache__/
+*.pyc

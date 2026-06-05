@@ -1,0 +1,41 @@
+# =============================================================================
+# OpenVINO 2026.1 model-preparation toolkit
+# Target: devices WITHOUT runtime dynamism (Intel NPU), static shapes, FP16.
+#
+# The version triple below is pinned and mutually compatible:
+#   * optimum-intel 1.27.0 requires openvino >= 2025.4.0  -> 2026.1.0 is OK
+#   * openvino-genai 2026.1.0.0 matches the 2026.1 runtime
+#
+# Install (CPU-only PyTorch keeps the footprint small; CUDA is not needed for
+# export):
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -U pip
+#   pip install -r requirements.txt
+# =============================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- OpenVINO 2026.1 runtime + tooling -------------------------------------
+openvino==2026.1.0
+openvino-tokenizers==2026.1.0.0
+openvino-genai==2026.1.0.0
+
+# --- Exporters --------------------------------------------------------------
+optimum-intel[openvino,diffusers]==1.27.0
+nncf>=2.19.0
+
+# --- Frameworks (pinned to the windows optimum-intel 1.27.0 supports) -------
+torch==2.8.0
+transformers>=4.45,<4.58
+diffusers>=0.30.0
+accelerate>=0.33.0
+sentencepiece
+protobuf
+
+# --- HuggingFace access / Llama gated download ------------------------------
+huggingface_hub>=0.25.0
+
+# --- Optional: only needed to run the verification / smoke-test scripts -----
+soundfile
+librosa
+datasets
