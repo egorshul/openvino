@@ -66,3 +66,6 @@ coverage
 /tools/commit_slider/slider_cache/*
 /src/plugins/intel_cpu/thirdparty/ComputeLibrary/build/arm_compute_version.embed
 .github/GITHUB_OUTPUT
+
+# Cortex-A75 build install tree (scripts/arm-cortex-a75)
+install-cortex-a75/
