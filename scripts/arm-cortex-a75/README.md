@@ -4,6 +4,10 @@ Scripts to build OpenVINO 2026.1 tuned for a 48-core aarch64 Cortex-A75 host
 (`CPU part 0xd0a`, armv8.2-a) and to benchmark the full Stable Diffusion XL
 pipeline with `benchmark_app`.
 
+> **Сборка на Astra Linux 4.7 arm (gcc 8.3.0):** подробная пошаговая инструкция
+> на русском — в [`BUILD_ASTRALINUX.md`](BUILD_ASTRALINUX.md). Там же — разбор,
+> почему штатного gcc 8.3.0 достаточно, и как при необходимости обновить gcc.
+
 ## Target CPU capabilities
 
 ```
