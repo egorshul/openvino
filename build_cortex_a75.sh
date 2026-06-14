@@ -6,7 +6,12 @@
 # Использование:
 #   export CC=/opt/gcc-11/bin/gcc-11 CXX=/opt/gcc-11/bin/g++-11   # рекомендуется GCC>=11
 #   ./build_cortex_a75.sh                  # сборка с KleidiAI (нужен GCC>=11)
+#   ./build_cortex_a75.sh --build-tbb      # доп. собрать свой oneTBB (нужно на
+#                                          # старом glibc, напр. AstraLinux)
 #   ./build_cortex_a75.sh --no-kleidiai    # запасной путь для GCC 8.3 (KleidiAI выключен)
+#
+# Прочее: --lto, --no-python; env: TBBROOT (готовый oneTBB), TBB_VERSION,
+#         BINUTILS_BIN (каталог нового 'as'), JOBS, BUILD_DIR, INSTALL_DIR.
 #
 set -euo pipefail
 
@@ -19,12 +24,15 @@ JOBS="${JOBS:-$(nproc)}"
 ENABLE_KLEIDIAI=ON
 ENABLE_PYTHON="${ENABLE_PYTHON:-ON}"
 ENABLE_LTO="${ENABLE_LTO:-OFF}"
+BUILD_TBB=0
+TBB_VERSION="${TBB_VERSION:-v2021.13.0}"
 
 for arg in "$@"; do
     case "$arg" in
         --no-kleidiai) ENABLE_KLEIDIAI=OFF ;;
         --lto)         ENABLE_LTO=ON ;;
         --no-python)   ENABLE_PYTHON=OFF ;;
+        --build-tbb)   BUILD_TBB=1 ;;
         *) echo "Неизвестный аргумент: $arg"; exit 1 ;;
     esac
 done
@@ -107,6 +115,43 @@ if [[ "$ENABLE_KLEIDIAI" == "ON" ]]; then
         exit 1
     fi
     echo "Проверка: ассемблер понимает i8mm/bf16 — OK."
+fi
+
+# --------------------------------------------------------------------------
+# TBB. Готовый arm64-бинарник oneTBB, который качает OpenVINO, собран против
+# НОВОГО glibc (символы @GLIBC_2.32/2.34) и не линкуется на AstraLinux
+# (glibc ~2.28): 'undefined reference to pthread_create@GLIBC_2.34'.
+# Решение — свой oneTBB из исходников (env TBBROOT отменяет загрузку prebuilt).
+if [[ "$BUILD_TBB" == "1" ]]; then
+    TBB_SRC="${ROOT_DIR}/_onetbb_src"
+    TBB_INSTALL="${TBBROOT:-${ROOT_DIR}/_onetbb_install}"
+    echo "--- Сборка oneTBB ${TBB_VERSION} из исходников -> ${TBB_INSTALL} ---"
+    if [[ ! -d "$TBB_SRC/.git" ]]; then
+        git clone --depth 1 --branch "$TBB_VERSION" \
+            https://github.com/uxlfoundation/oneTBB.git "$TBB_SRC"
+    fi
+    cmake -B "$TBB_SRC/build" -S "$TBB_SRC" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+        -DCMAKE_C_FLAGS="-mtune=cortex-a75 ${BPREFIX}" \
+        -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 ${BPREFIX} -static-libstdc++ -static-libgcc" \
+        -DTBB_TEST=OFF -DTBB_STRICT=OFF \
+        -DCMAKE_INSTALL_PREFIX="$TBB_INSTALL"
+    cmake --build "$TBB_SRC/build" --parallel "$JOBS"
+    cmake --install "$TBB_SRC/build"
+    export TBBROOT="$TBB_INSTALL"
+    echo "--- oneTBB готов, TBBROOT=$TBBROOT ---"
+fi
+
+if [[ -n "${TBBROOT:-}" ]]; then
+    echo "   TBBROOT=$TBBROOT (свой oneTBB; prebuilt качаться не будет)"
+else
+    echo ""
+    echo "ВНИМАНИЕ: TBBROOT не задан. OpenVINO скачает готовый arm64 oneTBB,"
+    echo "который собран против нового glibc и на AstraLinux (glibc ~2.28) даёт"
+    echo "ошибку линковки 'pthread_create@GLIBC_2.34'. Если так и вышло —"
+    echo "соберите свой oneTBB:  ./build_cortex_a75.sh --build-tbb   (раздел 3.4)"
+    echo ""
 fi
 
 # --------------------------------------------------------------------------

@@ -212,6 +212,50 @@ export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH
   бинарники самодостаточны и не зависят от `/opt/gcc-11`.
 * либо при запуске указывать `export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH`.
 
+### 3.4. Собрать oneTBB из исходников (нужно на старом glibc)
+
+OpenVINO по умолчанию **скачивает готовый** arm64-бинарник oneTBB
+(`oneapi-tbb-2021.13.1-lin-arm64-release.tgz`, см. `cmake/dependencies.cmake:143`).
+Несмотря на комментарий «glibc 2.17» в коде, этот бинарник фактически собран
+против **нового glibc** и на AstraLinux (glibc ~2.28) даёт ошибку линковки:
+```
+libtbb.so.12: undefined reference to `pthread_create@GLIBC_2.34'
+libtbb.so.12: undefined reference to `dlopen@GLIBC_2.34'
+libtbb.so.12: undefined reference to `pthread_getattr_np@GLIBC_2.32'
+...
+```
+(В glibc 2.34 функции `pthread_*`/`dl*` переехали в сам `libc`; на старом glibc
+их там нет — символы не разрешаются.)
+
+**Решение — собрать oneTBB своим GCC 11 против системного glibc.** Если задана
+переменная `TBBROOT`, OpenVINO **не качает** prebuilt, а использует ваш TBB
+(`cmake/.../dependency_solver.cmake:8`).
+
+```bash
+git clone --depth 1 --branch v2021.13.0 https://github.com/uxlfoundation/oneTBB.git
+cd oneTBB
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_STRICT=OFF \
+  -DCMAKE_C_COMPILER=/opt/gcc-11/bin/gcc-11 \
+  -DCMAKE_CXX_COMPILER=/opt/gcc-11/bin/g++-11 \
+  -DCMAKE_C_FLAGS="-mtune=cortex-a75 -B/opt/gcc-11/bin" \
+  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B/opt/gcc-11/bin -static-libstdc++ -static-libgcc" \
+  -DCMAKE_INSTALL_PREFIX=/opt/onetbb
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+cd ..
+
+export TBBROOT=/opt/onetbb     # теперь OpenVINO возьмёт ваш TBB, без загрузки
+```
+
+> `-static-libstdc++` для libtbb.so делает её самодостаточной в рантайме (не
+> тянет свежий libstdc++ из `/opt/gcc-11`).
+> Скрипт `build_cortex_a75.sh --build-tbb` делает всё это автоматически и сам
+> выставляет `TBBROOT`.
+>
+> **Альтернатива без TBB:** `-DTHREADING=OMP` (использовать OpenMP вместо TBB,
+> libgomp из GCC 11). Проще (никакого внешнего TBB), но на многоядерном A75
+> TBB обычно даёт лучшую масштабируемость — для максимума предпочтителен oneTBB.
+
 ---
 
 ## 4. Получение исходников OpenVINO 2026.1
@@ -245,7 +289,10 @@ export CXX=/opt/gcc-11/bin/g++-11
 export BINUTILS_BIN=/opt/gcc-11/bin                 # каталог со свежим 'as' (binutils 2.40)
 export PATH=/opt/gcc-11/bin:$PATH                   # ACL/scons ищет gcc-11 в PATH
 export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH  # ld.gold/g++ нового GCC
+export TBBROOT=/opt/onetbb                          # свой oneTBB (раздел 3.4)
 ./build_cortex_a75.sh
+# Если oneTBB ещё не собран — соберите его этим же скриптом:
+#   ./build_cortex_a75.sh --build-tbb
 ```
 
 > **Почему нужен `PATH`.** ComputeLibrary (ACL) собирается отдельным процессом
@@ -343,6 +390,8 @@ export BINUTILS_BIN=/opt/gcc-11/bin
 * добавляет каталог `libstdc++` нового GCC в `LD_LIBRARY_PATH` — чтобы
   `ld.gold`/`g++` нового toolchain запускались (иначе `ld.gold: ... GLIBCXX_3.4.29
   not found`);
+* с `--build-tbb` собирает свой oneTBB и выставляет `TBBROOT`; иначе
+  предупреждает, что готовый arm64 TBB не слинкуется на старом glibc;
 * проверяет, что и GCC (≥11), и ассемблер понимают `i8mm`/`bf16`, и при проблеме
   подсказывает, что обновить.
 
@@ -411,9 +460,15 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
      **binutils** (`as` 2.31), даже если GCC уже 11.
    KleidiAI безусловно собирает i8mm/bf16-микроядра, поэтому нужны **оба**:
    **GCC ≥ 11** И **binutils ≥ 2.34** (рекомендуется 2.40).
-3. **Максимальная производительность** → собрать **GCC 11** (3.1) **и
-   binutils 2.40** (3.2), добавить `/opt/gcc-11/bin` в `PATH` (нужно scons/ACL),
-   затем сборка с `KleidiAI=ON`, `arm64-v8.2-a`, `-mtune=cortex-a75`,
-   `-B$BINUTILS_BIN`, статический libstdc++.
-4. **Без обновления toolchain** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
+3. На старом glibc (AstraLinux ~2.28) ещё две ловушки окружения:
+   * `ld.gold: ... GLIBCXX_3.4.29 not found` → инструменты нового toolchain
+     требуют свежий libstdc++ → `LD_LIBRARY_PATH=/opt/gcc-11/lib64`;
+   * `libtbb.so.12: undefined reference to pthread_create@GLIBC_2.34` →
+     готовый arm64 oneTBB собран против нового glibc → собрать свой oneTBB
+     (3.4, `--build-tbb`) и задать `TBBROOT`.
+4. **Максимальная производительность** → собрать **GCC 11** (3.1) **и
+   binutils 2.40** (3.2) **и свой oneTBB** (3.4); выставить `PATH`,
+   `LD_LIBRARY_PATH`, `TBBROOT`; сборка с `KleidiAI=ON`, `arm64-v8.2-a`,
+   `-mtune=cortex-a75`, `-B$BINUTILS_BIN`, статический libstdc++.
+5. **Без обновления toolchain** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
    (раздел 7) — работает на GCC 8.3, но медленнее на квантованных моделях.
