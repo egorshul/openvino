@@ -251,6 +251,20 @@ export TBBROOT=/opt/onetbb     # теперь OpenVINO возьмёт ваш TBB
 > тянет свежий libstdc++ из `/opt/gcc-11`).
 > Скрипт `build_cortex_a75.sh --build-tbb` делает всё это автоматически и сам
 > выставляет `TBBROOT`.
+
+**Как этот TBB используется дальше:**
+* **Сборка.** Заданный `TBBROOT` отменяет загрузку prebuilt. Если вы уже
+  конфигурировали сборку со «сломанным» TBB — сначала удалите каталог сборки
+  (`rm -rf _build`), иначе путь к старому TBB останется в кэше CMake. Проверить
+  можно так: `grep -i 'TBB_DIR\|TBBROOT' _build/CMakeCache.txt` (должен быть ваш
+  `/opt/onetbb/...`, а не `.../temp/Linux_aarch64/tbb`).
+* **Установка.** Для кастомного TBB OpenVINO **сам копирует** `libtbb.so*` в
+  `install/runtime/3rdparty/tbb/lib` (`src/cmake/install_tbb.cmake`), а
+  `setupvars.sh` добавляет этот путь в `LD_LIBRARY_PATH`.
+* **Запуск.** Достаточно `source install/setupvars.sh`. Проверка:
+  `ldd install/runtime/lib/aarch64/libopenvino.so | grep tbb` — путь должен
+  вести в `3rdparty/tbb/lib` и без `not found`. Без `setupvars.sh` укажите путь
+  вручную: `export LD_LIBRARY_PATH=/opt/onetbb/lib:$LD_LIBRARY_PATH`.
 >
 > **Альтернатива без TBB:** `-DTHREADING=OMP` (использовать OpenMP вместо TBB,
 > libgomp из GCC 11). Проще (никакого внешнего TBB), но на многоядерном A75
