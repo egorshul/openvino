@@ -154,7 +154,7 @@ if [[ "$BUILD_TBB" == "1" ]]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
         -DCMAKE_C_FLAGS="-mtune=cortex-a75 ${BPREFIX}" \
-        -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 ${BPREFIX} -static-libstdc++ -static-libgcc" \
+        -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 ${BPREFIX}" \
         -DTBB_TEST=OFF -DTBB_STRICT=OFF \
         -DCMAKE_INSTALL_PREFIX="$TBB_INSTALL"
     cmake --build "$TBB_SRC/build" --parallel "$JOBS"
@@ -177,11 +177,17 @@ fi
 # --------------------------------------------------------------------------
 # Флаги тюнинга под Cortex-A75.
 #  -mtune=cortex-a75 : только планировщик, ISA не меняет (ACL/KleidiAI задают -march сами).
-#  static libstdc++  : самодостаточные бинарники при сборке свежим GCC из /opt.
 # BPREFIX (-B<dir>) заставляет gcc брать свежий 'as'/'ld' из нового binutils.
+#
+# ВАЖНО: НЕ используем -static-libstdc++/-static-libgcc. Вместе с OpenVINO'шным
+# -Wl,--exclude-libs,ALL это делает символы C++-рантайма локальными в каждой
+# .so, рантайм дублируется, и исключение из одной .so не ловится в другой ->
+# std::terminate ("Aborted") при инициализации. Линкуем рантайм динамически, а
+# нужные libstdc++.so.6 / libgcc_s.so.1 от gcc-11 кладём рядом после install
+# (см. ниже) либо задаём LD_LIBRARY_PATH=/opt/gcc-11/lib64 в рантайме.
 TUNE_FLAGS="-mtune=cortex-a75 ${BPREFIX}"
-C_FLAGS="${TUNE_FLAGS} -static-libgcc"
-CXX_FLAGS="${TUNE_FLAGS} -static-libstdc++ -static-libgcc"
+C_FLAGS="${TUNE_FLAGS}"
+CXX_FLAGS="${TUNE_FLAGS}"
 ASM_FLAGS="${BPREFIX}"
 
 GENERATOR="Unix Makefiles"
@@ -214,6 +220,21 @@ cmake -B "$BUILD_DIR" -S "$ROOT_DIR" -G "$GENERATOR" \
 
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
 cmake --install "$BUILD_DIR" --prefix "$INSTALL_DIR"
+
+# --------------------------------------------------------------------------
+# Кладём рядом с библиотеками OpenVINO свежие libstdc++/libgcc_s от gcc-11,
+# чтобы бинарники запускались на старом дистрибутиве (AstraLinux), где
+# системный libstdc++ от gcc 8.3 не содержит нужных GLIBCXX_3.4.2x.
+if [[ -n "${GCC_LIBDIR:-}" ]]; then
+    OV_LIBDIR="$(dirname "$(find "$INSTALL_DIR" -name 'libopenvino.so*' -print -quit 2>/dev/null)")"
+    if [[ -n "$OV_LIBDIR" && -d "$OV_LIBDIR" ]]; then
+        for lib in libstdc++.so libgcc_s.so; do
+            # копируем реальные файлы и символьные ссылки (libstdc++.so.6, .so.6.0.29 ...)
+            cp -a "$GCC_LIBDIR/${lib}".* "$OV_LIBDIR/" 2>/dev/null || true
+        done
+        echo "   Скопированы libstdc++/libgcc_s (gcc-11) в $OV_LIBDIR"
+    fi
+fi
 
 echo ""
 echo "Готово. Активируйте окружение:  source ${INSTALL_DIR}/setupvars.sh"

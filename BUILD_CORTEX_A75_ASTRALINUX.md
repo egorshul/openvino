@@ -205,12 +205,30 @@ export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH
 > Скрипт `build_cortex_a75.sh` определяет нужный каталог автоматически
 > (`g++ -print-file-name=libstdc++.so.6`) и выставляет `LD_LIBRARY_PATH` сам.
 
-**(б) В РАНТАЙМЕ** готовых бинарников OpenVINO — выберите **один** вариант:
+**(б) В РАНТАЙМЕ** готовых бинарников OpenVINO нужен свежий `libstdc++.so.6`
+(и `libgcc_s.so.1`) от gcc-11.
 
-* **(рекомендуется) статически слинковать** libstdc++/libgcc — это уже зашито
-  в `build_cortex_a75.sh` через флаги `-static-libstdc++ -static-libgcc`;
-  бинарники самодостаточны и не зависят от `/opt/gcc-11`.
-* либо при запуске указывать `export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH`.
+> ⚠️ **Не делайте `-static-libstdc++ -static-libgcc`!** Вместе с
+> OpenVINO'шным `-Wl,--exclude-libs,ALL` это делает символы C++-рантайма
+> **локальными** в каждой `.so`: раскрутка стека и `type_info` дублируются, и
+> исключение, брошенное в одной библиотеке (напр. в CPU-плагине при
+> инициализации), **не ловится** в другой → `std::terminate` → процесс падает
+> с **`Aborted`** уже на `hello_query_device`. Линкуйте C++-рантайм
+> **динамически**.
+
+Правильно — собрать динамически и **положить свежие либы рядом** с библиотеками
+OpenVINO. Скрипт `build_cortex_a75.sh` после установки сам копирует
+`libstdc++.so.6*` и `libgcc_s.so.1` из каталога gcc-11 в `runtime/lib/aarch64`,
+а `setupvars.sh` добавляет этот каталог в `LD_LIBRARY_PATH`. Если делаете
+вручную:
+```bash
+OV_LIB=install/runtime/lib/aarch64
+cp -a /opt/gcc-11/lib64/libstdc++.so.6*  "$OV_LIB"/
+cp -a /opt/gcc-11/lib64/libgcc_s.so.1    "$OV_LIB"/
+# дальше — обычный source install/setupvars.sh
+```
+Альтернатива (если `/opt/gcc-11` есть и на целевой машине): просто
+`export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH` перед запуском.
 
 ### 3.4. Собрать oneTBB из исходников (нужно на старом glibc)
 
@@ -238,7 +256,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF -DTBB_STRICT=OFF \
   -DCMAKE_C_COMPILER=/opt/gcc-11/bin/gcc-11 \
   -DCMAKE_CXX_COMPILER=/opt/gcc-11/bin/g++-11 \
   -DCMAKE_C_FLAGS="-mtune=cortex-a75 -B/opt/gcc-11/bin" \
-  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B/opt/gcc-11/bin -static-libstdc++ -static-libgcc" \
+  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B/opt/gcc-11/bin" \
   -DCMAKE_INSTALL_PREFIX=/opt/onetbb
 cmake --build build -j"$(nproc)"
 sudo cmake --install build
@@ -247,8 +265,9 @@ cd ..
 export TBBROOT=/opt/onetbb     # теперь OpenVINO возьмёт ваш TBB, без загрузки
 ```
 
-> `-static-libstdc++` для libtbb.so делает её самодостаточной в рантайме (не
-> тянет свежий libstdc++ из `/opt/gcc-11`).
+> libtbb.so линкуем с C++-рантаймом **динамически** (как и сам OpenVINO):
+> свежий `libstdc++.so.6` кладётся рядом с либами OV (раздел 3.3б) и виден
+> через `LD_LIBRARY_PATH` из `setupvars.sh`.
 > Скрипт `build_cortex_a75.sh --build-tbb` делает всё это автоматически и сам
 > выставляет `TBBROOT`.
 
@@ -334,9 +353,9 @@ cmake -B build -S . -G Ninja \
   -DCMAKE_C_COMPILER="$CC" \
   -DCMAKE_CXX_COMPILER="$CXX" \
   \
-  `# --- ТЮНИНГ ПОД CORTEX-A75 (+ -B на новый binutils) ---` \
-  -DCMAKE_C_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN} -static-libgcc" \
-  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN} -static-libstdc++ -static-libgcc" \
+  `# --- ТЮНИНГ ПОД CORTEX-A75 (+ -B на новый binutils; БЕЗ static-libstdc++!) ---` \
+  -DCMAKE_C_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN}" \
+  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN}" \
   -DCMAKE_ASM_FLAGS="-B${BINUTILS_BIN}" \
   -DOV_CPU_AARCH64_USE_MULTI_ISA=OFF \
   -DOV_CPU_ARM_TARGET_ARCH=arm64-v8.2-a \
@@ -374,7 +393,7 @@ cmake --install build --prefix "$PWD/install"
 | `ENABLE_KLEIDIAI_FOR_CPU=ON` | Быстрые INT4/INT8 микроядра matmul (особенно для LLM/квантованных моделей). Требует GCC ≥ 11. |
 | `THREADING=TBB` | Лучшая масштабируемость на 48 ядрах. |
 | `ENABLE_TBBBIND_2_5=OFF` | Отключает NUMA/hybrid-pinning (TBBBind). На этом CPU 1 NUMA-узел и 48 одинаковых ядер — биндить нечего, прироста нет. Заодно убирает warning «prebuilt TBBBIND_2_5 is not available». |
-| `-static-libstdc++ -static-libgcc` | Самодостаточные бинарники, не зависят от свежего `libstdc++` из `/opt/gcc-11`. |
+| C++-рантайм **динамически** (БЕЗ `-static-libstdc++`) | С `-Wl,--exclude-libs,ALL` статический libstdc++/libgcc ломает обработку исключений между `.so` (→ `Aborted`). Свежие `libstdc++.so.6`/`libgcc_s.so.1` кладём рядом с либами OV (раздел 3.3б). |
 | Отключение GPU/NPU/части фронтендов | Эти плагины для ARM CPU не нужны — ускоряет сборку. Оставьте фронтенды под ваш формат модели (TF/ONNX/PyTorch). |
 
 > **Опционально, ещё +производительность (с осторожностью):**
@@ -550,3 +569,4 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
 | `libtbb.so.12: undefined reference to pthread_create@GLIBC_2.34` | prebuilt arm64 oneTBB собран против нового glibc | свой oneTBB + `TBBROOT` (3.4, `--build-tbb`) |
 | `prebuilt TBBBIND_2_5 is not available` (warning) | для aarch64 нет готового TBBBind; на 1 NUMA не нужен | игнорировать или `-DENABLE_TBBBIND_2_5=OFF` |
 | `R_AARCH64_ADR_PREL_PG_HI21 against 'stdout@@GLIBC_2.17' ... recompile with -fPIC` при линковке `ov_cpu_unit_tests_*` | C-ядра ACL (вкл. KleidiAI `*.c`) собраны без `-fPIC`; тянутся в статические `-pie` тест-бинарники | **нужны тесты:** патч ACLConfig.cmake (раздел 5.1) + пересборка ACL начисто. **не нужны:** `-DENABLE_TESTS=OFF` |
+| `Aborted` (SIGABRT) сразу на запуске (`hello_query_device` и т.п.), часто `terminate called ...` | `-static-libstdc++/-static-libgcc` + `-Wl,--exclude-libs,ALL` ломают обработку исключений между `.so` | собирать C++-рантайм **динамически** (убрать static-флаги) и положить `libstdc++.so.6*`/`libgcc_s.so.1` от gcc-11 рядом с либами OV (раздел 3.3б) |
