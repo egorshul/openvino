@@ -225,11 +225,24 @@ sudo apt-get install -y scons ccache
 export CC=/opt/gcc-11/bin/gcc-11
 export CXX=/opt/gcc-11/bin/g++-11
 export BINUTILS_BIN=/opt/gcc-11/bin    # каталог со свежим 'as' (binutils 2.40)
+export PATH=/opt/gcc-11/bin:$PATH      # ОБЯЗАТЕЛЬНО: ACL/scons ищет gcc-11 в PATH
 ./build_cortex_a75.sh
 ```
 
+> **Почему нужен `PATH`.** ComputeLibrary (ACL) собирается отдельным процессом
+> `scons` с `build=native` и при этом **игнорирует `compiler_prefix`** — вызывает
+> компилятор по «голому» имени `g++-11`/`gcc-11`, ища его в `$PATH`
+> (см. `SConstruct`: при `build==native` `compiler_prefix=""`, далее
+> `env['CXX'] = compiler_cache + " " + compiler_prefix + cpp_compiler`). Если
+> `/opt/gcc-11/bin` нет в `PATH`, ACL падает с:
+> ```
+> ERROR: Compiler ' g++-11' not found
+> ```
+> Скрипт `build_cortex_a75.sh` сам добавляет каталог компилятора в `PATH`; при
+> ручной сборке это нужно сделать самостоятельно (строка `export PATH=...` выше).
+
 Либо вручную (обратите внимание на `-B${BINUTILS_BIN}` — он направляет gcc к
-новому ассемблеру):
+новому ассемблеру; `export PATH` из блока выше тоже обязателен):
 
 ```bash
 export CC=/opt/gcc-11/bin/gcc-11
@@ -305,8 +318,11 @@ export BINUTILS_BIN=/opt/gcc-11/bin
 ./build_cortex_a75.sh --no-kleidiai
 ```
 
-Скрипт перед сборкой сам проверяет, что и GCC (≥11), и ассемблер понимают
-`i8mm`/`bf16`, и при проблеме подсказывает, что обновить.
+Скрипт перед сборкой:
+* добавляет каталог компилятора (`dirname $CC`) в `PATH` — чтобы scons-сборка
+  ACL нашла `gcc-11`/`g++-11` по имени (иначе `Compiler ' g++-11' not found`);
+* проверяет, что и GCC (≥11), и ассемблер понимают `i8mm`/`bf16`, и при проблеме
+  подсказывает, что обновить.
 
 ---
 
@@ -374,7 +390,8 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
    KleidiAI безусловно собирает i8mm/bf16-микроядра, поэтому нужны **оба**:
    **GCC ≥ 11** И **binutils ≥ 2.34** (рекомендуется 2.40).
 3. **Максимальная производительность** → собрать **GCC 11** (3.1) **и
-   binutils 2.40** (3.2), затем сборка с `KleidiAI=ON`, `arm64-v8.2-a`,
-   `-mtune=cortex-a75`, `-B$BINUTILS_BIN`, статический libstdc++.
+   binutils 2.40** (3.2), добавить `/opt/gcc-11/bin` в `PATH` (нужно scons/ACL),
+   затем сборка с `KleidiAI=ON`, `arm64-v8.2-a`, `-mtune=cortex-a75`,
+   `-B$BINUTILS_BIN`, статический libstdc++.
 4. **Без обновления toolchain** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
    (раздел 7) — работает на GCC 8.3, но медленнее на квантованных моделях.

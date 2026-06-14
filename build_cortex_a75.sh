@@ -35,6 +35,17 @@ CC="${CC:-gcc}"
 CXX="${CXX:-g++}"
 GCC_VER="$("$CC" -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1)"
 
+# ВАЖНО: ComputeLibrary (ACL) собирается через scons с build=native и при этом
+# ИГНОРИРУЕТ compiler_prefix — вызывает компилятор по "голому" имени (gcc-11/
+# g++-11), ища его в $PATH. Если GCC стоит в /opt/gcc-11/bin и этого пути нет в
+# PATH, ACL падает с "Compiler ' g++-11' not found". Поэтому кладём каталог
+# компилятора в PATH.
+CC_DIR="$(cd "$(dirname "$CC")" 2>/dev/null && pwd || true)"
+if [[ -n "$CC_DIR" && ":$PATH:" != *":$CC_DIR:"* ]]; then
+    export PATH="$CC_DIR:$PATH"
+    echo "   PATH += $CC_DIR (нужно для scons-сборки ACL)"
+fi
+
 echo "=============================================================="
 echo " OpenVINO build for ARM Cortex-A75"
 echo "   CC=$CC ($("$CC" --version | head -1))"
