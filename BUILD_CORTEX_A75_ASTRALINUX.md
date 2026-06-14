@@ -487,3 +487,17 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
    `-mtune=cortex-a75`, `-B$BINUTILS_BIN`, статический libstdc++.
 5. **Без обновления toolchain** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
    (раздел 7) — работает на GCC 8.3, но медленнее на квантованных моделях.
+
+---
+
+## 10. Частые ошибки сборки (шпаргалка)
+
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| `cc1: error: invalid feature modifier '...+i8mm'` | старый **GCC** (8.3) | GCC ≥ 11 (3.1) |
+| `Assembler ... unknown architectural extension i8mm/bf16` | старый **binutils** (`as` 2.31) | binutils ≥ 2.40 (3.2) + `-B$BINUTILS_BIN` |
+| ACL/scons: `Compiler ' g++-11' not found` | scons ищет компилятор в `PATH` | `export PATH=/opt/gcc-11/bin:$PATH` (5) |
+| `ld.gold: ... GLIBCXX_3.4.29 not found` | инструменты нового toolchain тянут свежий libstdc++ | `export LD_LIBRARY_PATH=/opt/gcc-11/lib64:...` (3.3) |
+| `libtbb.so.12: undefined reference to pthread_create@GLIBC_2.34` | prebuilt arm64 oneTBB собран против нового glibc | свой oneTBB + `TBBROOT` (3.4, `--build-tbb`) |
+| `prebuilt TBBBIND_2_5 is not available` (warning) | для aarch64 нет готового TBBBind; на 1 NUMA не нужен | игнорировать или `-DENABLE_TBBBIND_2_5=OFF` |
+| `R_AARCH64_ADR_PREL_PG_HI21 against 'stdout@@GLIBC_2.17' ... recompile with -fPIC` при линковке `ov_cpu_unit_tests_*` | встроенное в ACL KleidiAI packing-ядро собрано без `-fPIC`; тянется только в статические `-pie` тест-бинарники | `-DENABLE_TESTS=OFF` (рантайм/плагин/сэмплы это ядро не используют и собираются нормально) |
