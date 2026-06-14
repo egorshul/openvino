@@ -373,6 +373,7 @@ cmake --install build --prefix "$PWD/install"
 | `OV_CPU_AARCH64_USE_MULTI_ISA=OFF` | Отключает SVE/SME multi-ISA ядра — на A75 их нет, незачем тратить время сборки. (FP16-ядра при этом сохраняются за счёт `arm64-v8.2-a`.) |
 | `ENABLE_KLEIDIAI_FOR_CPU=ON` | Быстрые INT4/INT8 микроядра matmul (особенно для LLM/квантованных моделей). Требует GCC ≥ 11. |
 | `THREADING=TBB` | Лучшая масштабируемость на 48 ядрах. |
+| `ENABLE_TBBBIND_2_5=OFF` | Отключает NUMA/hybrid-pinning (TBBBind). На этом CPU 1 NUMA-узел и 48 одинаковых ядер — биндить нечего, прироста нет. Заодно убирает warning «prebuilt TBBBIND_2_5 is not available». |
 | `-static-libstdc++ -static-libgcc` | Самодостаточные бинарники, не зависят от свежего `libstdc++` из `/opt/gcc-11`. |
 | Отключение GPU/NPU/части фронтендов | Эти плагины для ARM CPU не нужны — ускоряет сборку. Оставьте фронтенды под ваш формат модели (TF/ONNX/PyTorch). |
 
