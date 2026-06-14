@@ -37,38 +37,65 @@ runtime для процессора **ARM Cortex-A75** (aarch64) на **AstraLin
 
 ---
 
-## 2. Главная проблема: компилятор
+## 2. Главная проблема: устаревший toolchain (GCC **и** binutils)
 
-На AstraLinux 4.7 системный компилятор — **GCC 8.3.0**. Этого **недостаточно**:
+На AstraLinux 4.7 системный toolchain — **GCC 8.3.0 + binutils ~2.31**.
+Для KleidiAI этого недостаточно сразу по двум причинам, и важно понимать, что
+это **две разные проблемы**:
 
-1. **KleidiAI** требует **GCC ≥ 11**. На 8.3.0 вы видите:
-   ```
-   Using non-supported GCC version. Expected 11 or newer, received 8.3.0
-   ```
-   и затем фатальную ошибку компиляции микроядер:
-   ```
-   cc1: error: invalid feature modifier in '-march=armv8.2-a+fp16+i8mm'
-   ```
-   Причина: GCC 8.3 не знает модификатор `+i8mm` (поддержка добавлена в GCC 9/10),
-   а KleidiAI собирает все микроядра, включая i8mm-варианты, с такими `-march`.
-   В OpenVINO KleidiAI включается на aarch64 **безусловно**
-   (`ENABLE_KLEIDIAI_FOR_CPU=ON` по умолчанию, без проверки версии GCC —
-   см. `src/plugins/intel_cpu/CMakeLists.txt:130`).
+### 2a. GCC слишком старый (ошибка компилятора)
 
-2. **Multi-ISA ACL** (FP16 + SVE ядра одним билдом) требует **GCC ≥ 10.2**
-   (нужен заголовок `arm_sve.h`, см. `src/plugins/intel_cpu/CMakeLists.txt:75`).
-   На 8.3 он автоматически выключается, и теряется часть FP16-оптимизаций.
+На GCC 8.3.0 вы видите:
+```
+Using non-supported GCC version. Expected 11 or newer, received 8.3.0
+cc1: error: invalid feature modifier in '-march=armv8.2-a+fp16+i8mm'
+```
+Это ошибка **компилятора** (`cc1`): GCC 8.3 вообще не знает модификатор `+i8mm`
+(добавлен в GCC 9/10). Лечится обновлением GCC до **≥ 11** (раздел 3.1).
 
-> **Вывод.** Для **максимальной производительности** нужен **GCC 11** (или 12).
-> Тогда соберутся и KleidiAI (INT4/INT8 микроядра), и FP16-ядра ACL.
-> См. раздел 3 (рекомендуемый путь) — обновление GCC.
+### 2b. binutils (ассемблер) слишком старый (ошибка ассемблера)
+
+После обновления GCC до 11 ошибка **меняется** на другую:
+```
+Assembler messages:
+Error: unknown architectural extension `i8mm'
+Error: unrecognized option -march=armv8.2-a+fp16+i8mm
+...
+Error: unknown architectural extension `bf16'
+Error: unrecognized option -march=armv8.2-a+bf16
+```
+Теперь это уже ошибка **ассемблера** (`as` из binutils), а не компилятора.
+GCC 11 модификаторы `+i8mm`/`+bf16` понимает и передаёт их в `as`, но
+системный `as` из binutils 2.31 их не знает. Поддержка `i8mm`/`bf16` в GNU
+`as` появилась только в **binutils 2.34**. Когда вы собрали GCC 11 из
+исходников, он подхватил **системный `/usr/bin/as`** — отсюда ошибка.
+
+> **KleidiAI собирает i8mm- и bf16-микроядра безусловно** — даже на Cortex-A75,
+> где этих расширений нет. В рантайме они просто не выберутся, но
+> **скомпилироваться обязаны**. Поэтому для KleidiAI нужны ОБА условия:
+> **GCC ≥ 11** И **binutils ≥ 2.34** (рекомендуется 2.40).
+> В OpenVINO KleidiAI включён на aarch64 безусловно
+> (`src/plugins/intel_cpu/CMakeLists.txt:130`, без проверки версии toolchain).
+
+### 2c. Multi-ISA ACL
+
+**Multi-ISA ACL** (FP16 + SVE ядра одним билдом) требует **GCC ≥ 10.2**
+(нужен `arm_sve.h`, см. `src/plugins/intel_cpu/CMakeLists.txt:75`). На A75 SVE
+нет, поэтому в нашей конфигурации multi-ISA выключен намеренно
+(`OV_CPU_AARCH64_USE_MULTI_ISA=OFF`), а FP16-ядра сохраняются за счёт
+`arm64-v8.2-a`.
+
+> **Вывод.** Для **максимальной производительности** обновите **GCC до 11**
+> (раздел 3.1) **и binutils до ≥ 2.40** (раздел 3.2). Тогда соберётся весь
+> KleidiAI (включая dotprod-микроядра, которые A75 реально использует) и
+> FP16-ядра ACL.
 >
-> Если обновлять GCC нельзя — см. раздел 7 (запасной путь на GCC 8.3 с
-> отключённым KleidiAI; работает, но медленнее на INT8/INT4 LLM).
+> Если обновлять toolchain нельзя — см. раздел 7 (запасной путь с отключённым
+> KleidiAI; работает на старом GCC 8.3, но медленнее на INT8/INT4-моделях).
 
 ---
 
-## 3. Рекомендуемый путь: обновить GCC до 11 и собрать с KleidiAI
+## 3. Рекомендуемый путь: обновить toolchain (GCC 11 + binutils 2.40) и собрать с KleidiAI
 
 ### 3.1. Сборка GCC 11 из исходников (нативно на устройстве)
 
@@ -112,7 +139,51 @@ sudo make install
 >   но рискует несовместимостью `GLIBC`/`libstdc++` с AstraLinux. Нативная
 >   сборка с GCC 11, собранным на самом устройстве, — самый безопасный вариант.
 
-### 3.2. Важно про libstdc++ в рантайме
+### 3.2. Обновить binutils до ≥ 2.40 (КРИТИЧНО для KleidiAI)
+
+Даже со свежим GCC 11 ассемблер из системного binutils 2.31 не знает
+`i8mm`/`bf16`. Соберём binutils 2.40 и установим **в тот же prefix**
+`/opt/gcc-11`, чтобы GCC брал новый `as`:
+
+```bash
+cd /tmp
+wget https://ftp.gnu.org/gnu/binutils/binutils-2.40.tar.xz
+tar xf binutils-2.40.tar.xz
+cd binutils-2.40
+mkdir build && cd build
+../configure --prefix=/opt/gcc-11 --enable-gold --enable-ld=default
+make -j"$(nproc)"
+sudo make install
+```
+
+Теперь самое важное — **заставить уже собранный GCC 11 использовать новый `as`**.
+Два способа:
+
+* **(быстро, без пересборки GCC)** передавать gcc флаг `-B/opt/gcc-11/bin` —
+  он указывает, откуда брать `as`/`ld`. В скрипте `build_cortex_a75.sh` это
+  делается автоматически, если задать:
+  ```bash
+  export BINUTILS_BIN=/opt/gcc-11/bin
+  ```
+* **(чисто, навсегда)** пересобрать GCC 11 (раздел 3.1) **после** установки
+  binutils в `/opt/gcc-11` — тогда GCC «запомнит» новый ассемблер и `-B` не нужен.
+
+**Проверка, что ассемблер понимает i8mm/bf16** (должно вывести `OK`):
+```bash
+echo 'int f(void){return 0;}' | \
+  /opt/gcc-11/bin/gcc-11 -B/opt/gcc-11/bin -march=armv8.2-a+i8mm -x c - -c -o /tmp/t.o \
+  && echo OK
+echo 'int f(void){return 0;}' | \
+  /opt/gcc-11/bin/gcc-11 -B/opt/gcc-11/bin -march=armv8.2-a+bf16 -x c - -c -o /tmp/t.o \
+  && echo OK
+```
+Если оба `OK` — KleidiAI соберётся.
+
+> Примечание: `as` версии 2.40 распознаёт `i8mm`/`bf16` как архитектурные
+> расширения и для Cortex-A75 (`armv8.2-a`). Это нормально: код этих микроядер
+> попадёт в библиотеку, но в рантайме на A75 не будет выбран.
+
+### 3.3. Важно про libstdc++ в рантайме
 
 OpenVINO, собранный GCC 11, использует более новый `libstdc++`, чем системный
 (от GCC 8.3). Чтобы при запуске не ловить `GLIBCXX_3.4.29 not found`, выберите
@@ -153,23 +224,27 @@ sudo apt-get install -y scons ccache
 ```bash
 export CC=/opt/gcc-11/bin/gcc-11
 export CXX=/opt/gcc-11/bin/g++-11
+export BINUTILS_BIN=/opt/gcc-11/bin    # каталог со свежим 'as' (binutils 2.40)
 ./build_cortex_a75.sh
 ```
 
-Либо вручную:
+Либо вручную (обратите внимание на `-B${BINUTILS_BIN}` — он направляет gcc к
+новому ассемблеру):
 
 ```bash
 export CC=/opt/gcc-11/bin/gcc-11
 export CXX=/opt/gcc-11/bin/g++-11
+export BINUTILS_BIN=/opt/gcc-11/bin
 
 cmake -B build -S . -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER="$CC" \
   -DCMAKE_CXX_COMPILER="$CXX" \
   \
-  `# --- ТЮНИНГ ПОД CORTEX-A75 ---` \
-  -DCMAKE_C_FLAGS="-mtune=cortex-a75 -static-libgcc" \
-  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -static-libstdc++ -static-libgcc" \
+  `# --- ТЮНИНГ ПОД CORTEX-A75 (+ -B на новый binutils) ---` \
+  -DCMAKE_C_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN} -static-libgcc" \
+  -DCMAKE_CXX_FLAGS="-mtune=cortex-a75 -B${BINUTILS_BIN} -static-libstdc++ -static-libgcc" \
+  -DCMAKE_ASM_FLAGS="-B${BINUTILS_BIN}" \
   -DOV_CPU_AARCH64_USE_MULTI_ISA=OFF \
   -DOV_CPU_ARM_TARGET_ARCH=arm64-v8.2-a \
   \
@@ -221,21 +296,26 @@ cmake --install build --prefix "$PWD/install"
 из раздела 5, автоматически определяет компилятор и параметры. Использование:
 
 ```bash
-# с GCC 11 (рекомендуется):
+# с GCC 11 + binutils 2.40 (рекомендуется):
 export CC=/opt/gcc-11/bin/gcc-11 CXX=/opt/gcc-11/bin/g++-11
+export BINUTILS_BIN=/opt/gcc-11/bin
 ./build_cortex_a75.sh
 
-# запасной путь на системном GCC 8.3 (KleidiAI выключится автоматически):
+# запасной путь на системном GCC 8.3 (KleidiAI выключается флагом):
 ./build_cortex_a75.sh --no-kleidiai
 ```
 
+Скрипт перед сборкой сам проверяет, что и GCC (≥11), и ассемблер понимают
+`i8mm`/`bf16`, и при проблеме подсказывает, что обновить.
+
 ---
 
-## 7. Запасной путь: GCC 8.3 без обновления (KleidiAI OFF)
+## 7. Запасной путь: системный toolchain без обновления (KleidiAI OFF)
 
-Если обновить компилятор сейчас нельзя — собираем на системном GCC 8.3.0,
-**отключив KleidiAI** (именно он генерит `+i8mm` и падает). Multi-ISA на 8.3
-и так выключен, поэтому ошибок с `arm_sve.h` не будет.
+Если обновлять GCC/binutils сейчас нельзя — собираем на системном GCC 8.3.0,
+**отключив KleidiAI** (именно он генерит `+i8mm`/`+bf16` и падает — как на
+старом GCC, так и на старом ассемблере). Multi-ISA на 8.3 и так выключен,
+поэтому ошибок с `arm_sve.h` не будет.
 
 ```bash
 cmake -B build -S . -G Ninja \
@@ -287,9 +367,14 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
 ## 9. Краткая шпаргалка (TL;DR)
 
 1. Cortex-A75 = `armv8.2-a` + FP16 + DotProd, **без i8mm/bf16/sve**.
-2. Ошибка `invalid feature modifier '...+i8mm'` = KleidiAI + старый GCC 8.3.
-3. **Максимальная производительность** → собрать **GCC 11** (раздел 3),
-   затем сборка с `KleidiAI=ON`, `arm64-v8.2-a`, `-mtune=cortex-a75`,
-   статический libstdc++.
-4. **Без обновления GCC** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
+2. Две разные ошибки одного корня — старый toolchain:
+   * `cc1: error: invalid feature modifier '...+i8mm'` → старый **GCC** (8.3);
+   * `Assembler ... unknown architectural extension i8mm/bf16` → старый
+     **binutils** (`as` 2.31), даже если GCC уже 11.
+   KleidiAI безусловно собирает i8mm/bf16-микроядра, поэтому нужны **оба**:
+   **GCC ≥ 11** И **binutils ≥ 2.34** (рекомендуется 2.40).
+3. **Максимальная производительность** → собрать **GCC 11** (3.1) **и
+   binutils 2.40** (3.2), затем сборка с `KleidiAI=ON`, `arm64-v8.2-a`,
+   `-mtune=cortex-a75`, `-B$BINUTILS_BIN`, статический libstdc++.
+4. **Без обновления toolchain** → собрать с `-DENABLE_KLEIDIAI_FOR_CPU=OFF`
    (раздел 7) — работает на GCC 8.3, но медленнее на квантованных моделях.

@@ -43,26 +43,56 @@ echo "   KleidiAI=$ENABLE_KLEIDIAI  LTO=$ENABLE_LTO  Python=$ENABLE_PYTHON"
 echo "   jobs=$JOBS  build=$BUILD_DIR  install=$INSTALL_DIR"
 echo "=============================================================="
 
-# Защита от типичной ошибки: KleidiAI на старом GCC падает на '+i8mm'.
-if [[ "$ENABLE_KLEIDIAI" == "ON" && "${GCC_VER:-0}" -lt 11 ]]; then
-    echo ""
-    echo "ВНИМАНИЕ: KleidiAI требует GCC>=11, а обнаружен GCC ${GCC_VER}.x."
-    echo "Сборка KleidiAI упадёт с 'invalid feature modifier in -march=...+i8mm'."
-    echo "Варианты:"
-    echo "  1) Соберите GCC 11 (см. BUILD_CORTEX_A75_ASTRALINUX.md, раздел 3)"
-    echo "     и задайте: export CC=/opt/gcc-11/bin/gcc-11 CXX=/opt/gcc-11/bin/g++-11"
-    echo "  2) Запустите с флагом: ./build_cortex_a75.sh --no-kleidiai"
-    echo ""
-    exit 1
+# Опциональный prefix со СВЕЖИМ binutils (>=2.34), чтобы уже собранный GCC
+# использовал ассемблер, понимающий i8mm/bf16. Передаётся в gcc через -B.
+#   export BINUTILS_BIN=/opt/gcc-11/bin   (каталог, где лежит новый 'as')
+BINUTILS_BIN="${BINUTILS_BIN:-}"
+BPREFIX=""
+if [[ -n "$BINUTILS_BIN" ]]; then
+    BPREFIX="-B${BINUTILS_BIN}"
+fi
+
+# Проверка, что ассемблер реально понимает i8mm (нужно для KleidiAI).
+# Частая ситуация: GCC обновили до 11, но binutils остался 2.31 (AstraLinux),
+# и сборка падает на 'Assembler ... unknown architectural extension i8mm'.
+asm_supports_i8mm() {
+    echo 'int f(void){return 0;}' | \
+        "$CC" $BPREFIX -march=armv8.2-a+i8mm -x c - -c -o /dev/null 2>/dev/null
+}
+
+if [[ "$ENABLE_KLEIDIAI" == "ON" ]]; then
+    if [[ "${GCC_VER:-0}" -lt 11 ]]; then
+        echo ""
+        echo "ВНИМАНИЕ: KleidiAI требует GCC>=11, а обнаружен GCC ${GCC_VER}.x."
+        echo "Соберите GCC 11 (BUILD_CORTEX_A75_ASTRALINUX.md, раздел 3) либо"
+        echo "запустите: ./build_cortex_a75.sh --no-kleidiai"
+        echo ""
+        exit 1
+    fi
+    if ! asm_supports_i8mm; then
+        echo ""
+        echo "ВНИМАНИЕ: ассемблер (binutils) не понимает '+i8mm'/'+bf16'."
+        echo "GCC у вас свежий, но 'as' старый (на AstraLinux обычно binutils 2.31)."
+        echo "KleidiAI упадёт на 'Assembler ... unknown architectural extension i8mm'."
+        echo "Варианты:"
+        echo "  1) Соберите binutils>=2.40 (раздел 3.2) и укажите каталог с новым as:"
+        echo "       export BINUTILS_BIN=/opt/gcc-11/bin"
+        echo "  2) Запустите без KleidiAI:  ./build_cortex_a75.sh --no-kleidiai"
+        echo ""
+        exit 1
+    fi
+    echo "Проверка: ассемблер понимает i8mm/bf16 — OK."
 fi
 
 # --------------------------------------------------------------------------
 # Флаги тюнинга под Cortex-A75.
 #  -mtune=cortex-a75 : только планировщик, ISA не меняет (ACL/KleidiAI задают -march сами).
 #  static libstdc++  : самодостаточные бинарники при сборке свежим GCC из /opt.
-TUNE_FLAGS="-mtune=cortex-a75"
+# BPREFIX (-B<dir>) заставляет gcc брать свежий 'as'/'ld' из нового binutils.
+TUNE_FLAGS="-mtune=cortex-a75 ${BPREFIX}"
 C_FLAGS="${TUNE_FLAGS} -static-libgcc"
 CXX_FLAGS="${TUNE_FLAGS} -static-libstdc++ -static-libgcc"
+ASM_FLAGS="${BPREFIX}"
 
 GENERATOR="Unix Makefiles"
 if command -v ninja >/dev/null 2>&1; then GENERATOR="Ninja"; fi
@@ -73,6 +103,7 @@ cmake -B "$BUILD_DIR" -S "$ROOT_DIR" -G "$GENERATOR" \
   -DCMAKE_CXX_COMPILER="$CXX" \
   -DCMAKE_C_FLAGS="$C_FLAGS" \
   -DCMAKE_CXX_FLAGS="$CXX_FLAGS" \
+  -DCMAKE_ASM_FLAGS="$ASM_FLAGS" \
   -DOV_CPU_AARCH64_USE_MULTI_ISA=OFF \
   -DOV_CPU_ARM_TARGET_ARCH=arm64-v8.2-a \
   -DENABLE_KLEIDIAI_FOR_CPU="$ENABLE_KLEIDIAI" \
