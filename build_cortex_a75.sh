@@ -8,6 +8,7 @@
 #   ./build_cortex_a75.sh                  # сборка с KleidiAI (нужен GCC>=11)
 #   ./build_cortex_a75.sh --build-tbb      # доп. собрать свой oneTBB (нужно на
 #                                          # старом glibc, напр. AstraLinux)
+#   ./build_cortex_a75.sh --with-tests     # собрать и юнит-тесты (нужен патч ACL, раздел 5.1)
 #   ./build_cortex_a75.sh --no-kleidiai    # запасной путь для GCC 8.3 (KleidiAI выключен)
 #
 # Прочее: --lto, --no-python; env: TBBROOT (готовый oneTBB), TBB_VERSION,
@@ -24,6 +25,7 @@ JOBS="${JOBS:-$(nproc)}"
 ENABLE_KLEIDIAI=ON
 ENABLE_PYTHON="${ENABLE_PYTHON:-ON}"
 ENABLE_LTO="${ENABLE_LTO:-OFF}"
+ENABLE_TESTS=OFF
 BUILD_TBB=0
 TBB_VERSION="${TBB_VERSION:-v2021.13.0}"
 
@@ -32,6 +34,7 @@ for arg in "$@"; do
         --no-kleidiai) ENABLE_KLEIDIAI=OFF ;;
         --lto)         ENABLE_LTO=ON ;;
         --no-python)   ENABLE_PYTHON=OFF ;;
+        --with-tests)  ENABLE_TESTS=ON ;;
         --build-tbb)   BUILD_TBB=1 ;;
         *) echo "Неизвестный аргумент: $arg"; exit 1 ;;
     esac
@@ -118,6 +121,23 @@ if [[ "$ENABLE_KLEIDIAI" == "ON" ]]; then
 fi
 
 # --------------------------------------------------------------------------
+# Сборка с тестами требует, чтобы C-ядра ACL (в т.ч. KleidiAI *.c) собирались
+# с -fPIC, иначе статические -pie тест-бинарники падают на
+# 'R_AARCH64_ADR_PREL_PG_HI21 ... recompile with -fPIC'. Проверяем, что патч
+# ACLConfig.cmake применён (см. BUILD_CORTEX_A75_ASTRALINUX.md, раздел 5.1).
+ACLCFG="${ROOT_DIR}/src/plugins/intel_cpu/thirdparty/ACLConfig.cmake"
+if [[ "$ENABLE_TESTS" == "ON" && -f "$ACLCFG" ]] && ! grep -q "extra_cc_flags.*-fPIC" "$ACLCFG"; then
+    echo ""
+    echo "ВНИМАНИЕ: сборка с тестами (--with-tests), но в ACLConfig.cmake нет"
+    echo "-fPIC для C-ядер ACL. Тесты упадут на линковке ov_cpu_unit_tests_*"
+    echo "('... R_AARCH64_ADR_PREL_PG_HI21 ... recompile with -fPIC')."
+    echo "Примените патч из раздела 5.1 инструкции к ${ACLCFG}"
+    echo "и удалите каталог сборки ACL, затем перезапустите."
+    echo ""
+    exit 1
+fi
+
+# --------------------------------------------------------------------------
 # TBB. Готовый arm64-бинарник oneTBB, который качает OpenVINO, собран против
 # НОВОГО glibc (символы @GLIBC_2.32/2.34) и не линкуется на AstraLinux
 # (glibc ~2.28): 'undefined reference to pthread_create@GLIBC_2.34'.
@@ -188,7 +208,7 @@ cmake -B "$BUILD_DIR" -S "$ROOT_DIR" -G "$GENERATOR" \
   -DENABLE_OV_PADDLE_FRONTEND=OFF \
   -DENABLE_OV_JAX_FRONTEND=OFF \
   -DENABLE_SAMPLES=ON \
-  -DENABLE_TESTS=OFF \
+  -DENABLE_TESTS="$ENABLE_TESTS" \
   -DENABLE_PYTHON="$ENABLE_PYTHON" \
   ${ENABLE_PYTHON:+-DPython3_EXECUTABLE="$(command -v python3)"}
 

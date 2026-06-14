@@ -382,6 +382,55 @@ cmake --install build --prefix "$PWD/install"
 > но заметно увеличивает время и потребление памяти при линковке; включайте,
 > если сборочная машина это потянет.
 
+### 5.1. Сборка с тестами (`-DENABLE_TESTS=ON`) — патч ACL для `-fPIC`
+
+Если нужны юнит-тесты (`ov_cpu_unit_tests_*`), сначала исправьте баг в сборке
+ComputeLibrary: его C-ядра (включая встроенные KleidiAI `*.c`) собираются **без
+`-fPIC`**, и статические `-pie` тест-бинарники падают на линковке:
+```
+relocation R_AARCH64_ADR_PREL_PG_HI21 against symbol `stdout@@GLIBC_2.17' ...
+recompile with -fPIC
+```
+Причина: в `src/plugins/intel_cpu/thirdparty/ACLConfig.cmake` `-fPIC`
+добавляется только в `extra_cxx_flags` (C++), а C-файлы идут через
+`extra_cc_flags`, куда `-fPIC` не попадает.
+
+**Патч** — в `ACLConfig.cmake` найдите блок `# Initialize flags`:
+```cmake
+    # Initialize flags
+    set(extra_cxx_flags "${CMAKE_CXX_FLAGS} -Wno-undef")
+    if(MSVC64)
+        string(REPLACE "/MP " "" extra_cxx_flags "${extra_cxx_flags}")
+    elseif(CMAKE_POSITION_INDEPENDENT_CODE)
+        set(extra_cxx_flags "${extra_cxx_flags} -fPIC")
+    endif()
+```
+и приведите его к виду (добавлены 3 строки про `extra_cc_flags`):
+```cmake
+    # Initialize flags
+    set(extra_cxx_flags "${CMAKE_CXX_FLAGS} -Wno-undef")
+    set(extra_cc_flags "${CMAKE_C_FLAGS}")
+    if(MSVC64)
+        string(REPLACE "/MP " "" extra_cxx_flags "${extra_cxx_flags}")
+    elseif(CMAKE_POSITION_INDEPENDENT_CODE)
+        set(extra_cxx_flags "${extra_cxx_flags} -fPIC")
+        set(extra_cc_flags "${extra_cc_flags} -fPIC")
+    endif()
+```
+
+После патча **пересоберите ACL начисто** (иначе scons не перекомпилирует уже
+собранные `.o` с новым флагом):
+```bash
+rm -rf _build/src/plugins/intel_cpu/thirdparty/acl_build
+rm -rf src/plugins/intel_cpu/thirdparty/ComputeLibrary/build
+```
+и запускайте сборку с тестами:
+```bash
+./build_cortex_a75.sh --with-tests        # либо вручную добавьте -DENABLE_TESTS=ON
+```
+Скрипт сам проверяет наличие патча при `--with-tests` и не даёт стартовать
+заведомо падающую сборку.
+
 ---
 
 ## 6. Скрипт сборки
@@ -500,4 +549,4 @@ print(c.get_property('CPU','FULL_DEVICE_NAME'))"
 | `ld.gold: ... GLIBCXX_3.4.29 not found` | инструменты нового toolchain тянут свежий libstdc++ | `export LD_LIBRARY_PATH=/opt/gcc-11/lib64:...` (3.3) |
 | `libtbb.so.12: undefined reference to pthread_create@GLIBC_2.34` | prebuilt arm64 oneTBB собран против нового glibc | свой oneTBB + `TBBROOT` (3.4, `--build-tbb`) |
 | `prebuilt TBBBIND_2_5 is not available` (warning) | для aarch64 нет готового TBBBind; на 1 NUMA не нужен | игнорировать или `-DENABLE_TBBBIND_2_5=OFF` |
-| `R_AARCH64_ADR_PREL_PG_HI21 against 'stdout@@GLIBC_2.17' ... recompile with -fPIC` при линковке `ov_cpu_unit_tests_*` | встроенное в ACL KleidiAI packing-ядро собрано без `-fPIC`; тянется только в статические `-pie` тест-бинарники | `-DENABLE_TESTS=OFF` (рантайм/плагин/сэмплы это ядро не используют и собираются нормально) |
+| `R_AARCH64_ADR_PREL_PG_HI21 against 'stdout@@GLIBC_2.17' ... recompile with -fPIC` при линковке `ov_cpu_unit_tests_*` | C-ядра ACL (вкл. KleidiAI `*.c`) собраны без `-fPIC`; тянутся в статические `-pie` тест-бинарники | **нужны тесты:** патч ACLConfig.cmake (раздел 5.1) + пересборка ACL начисто. **не нужны:** `-DENABLE_TESTS=OFF` |
