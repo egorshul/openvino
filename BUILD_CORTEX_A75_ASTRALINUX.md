@@ -183,11 +183,29 @@ echo 'int f(void){return 0;}' | \
 > расширения и для Cortex-A75 (`armv8.2-a`). Это нормально: код этих микроядер
 > попадёт в библиотеку, но в рантайме на A75 не будет выбран.
 
-### 3.3. Важно про libstdc++ в рантайме
+### 3.3. Важно про libstdc++ — и при сборке, и в рантайме
 
-OpenVINO, собранный GCC 11, использует более новый `libstdc++`, чем системный
-(от GCC 8.3). Чтобы при запуске не ловить `GLIBCXX_3.4.29 not found`, выберите
-**один** из вариантов:
+GCC 11 и binutils 2.40, собранные в `/opt/gcc-11`, используют более новый
+`libstdc++`, чем системный (от GCC 8.3). Это даёт **две разные** проблемы с
+одной и той же ошибкой `GLIBCXX_3.4.29 not found`:
+
+**(а) Во время СБОРКИ** — собственные C++-инструменты toolchain (`ld.gold`,
+`g++`) слинкованы со свежим `libstdc++` и при запуске требуют его:
+```
+/opt/gcc-11/bin/ld.gold: /lib/aarch64-linux-gnu/libstdc++.so.6: version `GLIBCXX_3.4.29' not found (required by /opt/gcc-11/bin/ld.gold)
+```
+(OpenVINO подхватывает `ld.gold` через `-fuse-ld=gold`, т.к. `/opt/gcc-11/bin`
+теперь в `PATH`.) Лечится добавлением каталога с новым `libstdc++` в
+`LD_LIBRARY_PATH` **на время сборки**:
+```bash
+export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH
+```
+> `-static-libstdc++` тут не спасает — он влияет на итоговые библиотеки
+> OpenVINO, а не на сам линкер (это отдельный процесс).
+> Скрипт `build_cortex_a75.sh` определяет нужный каталог автоматически
+> (`g++ -print-file-name=libstdc++.so.6`) и выставляет `LD_LIBRARY_PATH` сам.
+
+**(б) В РАНТАЙМЕ** готовых бинарников OpenVINO — выберите **один** вариант:
 
 * **(рекомендуется) статически слинковать** libstdc++/libgcc — это уже зашито
   в `build_cortex_a75.sh` через флаги `-static-libstdc++ -static-libgcc`;
@@ -224,8 +242,9 @@ sudo apt-get install -y scons ccache
 ```bash
 export CC=/opt/gcc-11/bin/gcc-11
 export CXX=/opt/gcc-11/bin/g++-11
-export BINUTILS_BIN=/opt/gcc-11/bin    # каталог со свежим 'as' (binutils 2.40)
-export PATH=/opt/gcc-11/bin:$PATH      # ОБЯЗАТЕЛЬНО: ACL/scons ищет gcc-11 в PATH
+export BINUTILS_BIN=/opt/gcc-11/bin                 # каталог со свежим 'as' (binutils 2.40)
+export PATH=/opt/gcc-11/bin:$PATH                   # ACL/scons ищет gcc-11 в PATH
+export LD_LIBRARY_PATH=/opt/gcc-11/lib64:$LD_LIBRARY_PATH  # ld.gold/g++ нового GCC
 ./build_cortex_a75.sh
 ```
 
@@ -321,6 +340,9 @@ export BINUTILS_BIN=/opt/gcc-11/bin
 Скрипт перед сборкой:
 * добавляет каталог компилятора (`dirname $CC`) в `PATH` — чтобы scons-сборка
   ACL нашла `gcc-11`/`g++-11` по имени (иначе `Compiler ' g++-11' not found`);
+* добавляет каталог `libstdc++` нового GCC в `LD_LIBRARY_PATH` — чтобы
+  `ld.gold`/`g++` нового toolchain запускались (иначе `ld.gold: ... GLIBCXX_3.4.29
+  not found`);
 * проверяет, что и GCC (≥11), и ассемблер понимают `i8mm`/`bf16`, и при проблеме
   подсказывает, что обновить.
 

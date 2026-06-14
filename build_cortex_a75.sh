@@ -46,6 +46,20 @@ if [[ -n "$CC_DIR" && ":$PATH:" != *":$CC_DIR:"* ]]; then
     echo "   PATH += $CC_DIR (нужно для scons-сборки ACL)"
 fi
 
+# ВАЖНО (часть 2): если GCC/binutils собраны из исходников в /opt, то их
+# собственные C++-инструменты (ld.gold, g++) слинкованы со СВЕЖИМ libstdc++ и
+# при запуске требуют его (GLIBCXX_3.4.29 и т.п.). Системный libstdc++ от gcc
+# 8.3 их не содержит -> 'ld.gold: ... GLIBCXX_3.4.29 not found'. Кладём родной
+# каталог libstdc++ нового GCC в LD_LIBRARY_PATH на время сборки.
+GCC_LIBSTDCPP="$("$CXX" -print-file-name=libstdc++.so.6 2>/dev/null || true)"
+if [[ "$GCC_LIBSTDCPP" == /* ]]; then
+    GCC_LIBDIR="$(cd "$(dirname "$GCC_LIBSTDCPP")" && pwd)"
+    if [[ ":${LD_LIBRARY_PATH:-}:" != *":$GCC_LIBDIR:"* ]]; then
+        export LD_LIBRARY_PATH="$GCC_LIBDIR:${LD_LIBRARY_PATH:-}"
+        echo "   LD_LIBRARY_PATH += $GCC_LIBDIR (для ld.gold/g++ нового GCC)"
+    fi
+fi
+
 echo "=============================================================="
 echo " OpenVINO build for ARM Cortex-A75"
 echo "   CC=$CC ($("$CC" --version | head -1))"
