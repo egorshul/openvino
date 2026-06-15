@@ -1385,3 +1385,31 @@ TEST_F(TransformationTestsF, MarkRandomUniformAsPrecisionSensitive) {
     model_ref = model->clone();
     manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map, empty_fuse_map, true, false, true);
 }
+
+// RandomUniform is precision-sensitive and kept in FP32. Its keep-FP32 mark must
+// propagate through Transpose, otherwise a downstream Pad whose pad_value is a
+// separate FP32 constant becomes inconsistent during FP32->FP16 ConvertPrecision:
+// the scalar pad_value is converted to f16 while the Pad data input stays f32,
+// yielding an invalid graph ("arg_pad element type: f16"). Regression for that.
+TEST(TransformationTests, ConvertPrecisionKeepFP32RandomUniformTransposePad) {
+    using namespace ov::opset10;
+    auto out_shape = v0::Constant::create(element::i64, Shape{4}, {1, 4, 8, 8});
+    auto min_val = v0::Constant::create(element::f32, Shape{}, {0.0f});
+    auto max_val = v0::Constant::create(element::f32, Shape{}, {1.0f});
+    auto random_uniform = make_shared<RandomUniform>(out_shape, min_val, max_val, element::f32);
+    auto order = v0::Constant::create(element::i64, Shape{4}, {0, 2, 3, 1});
+    auto transpose = make_shared<Transpose>(random_uniform, order);
+    auto pads_begin = v0::Constant::create(element::i32, Shape{4}, {0, 0, 0, 0});
+    auto pads_end = v0::Constant::create(element::i32, Shape{4}, {0, 0, 0, 4});
+    auto pad_value = v0::Constant::create(element::f32, Shape{}, {0.0f});
+    auto pad = make_shared<Pad>(transpose, pads_begin, pads_end, pad_value, ov::op::PadMode::CONSTANT);
+    auto res = make_shared<v0::Result>(pad);
+    auto model = make_shared<Model>(OutputVector{res}, ParameterVector{});
+
+    pass::Manager manager;
+    precisions_map fp_convert_precision_map = {{element::f32, element::f16}};
+    type_to_fuse_map empty_fuse_map;
+    manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map, empty_fuse_map, true, false, true);
+    OV_ASSERT_NO_THROW(manager.run_passes(model));
+    OV_ASSERT_NO_THROW(model->validate_nodes_and_infer_types());
+}

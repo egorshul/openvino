@@ -93,6 +93,7 @@ const std::shared_ptr<Node> propagate_through_ops =
     pattern::wrap_type<v0::Squeeze,
                        v0::Unsqueeze,
                        v1::Reshape,
+                       v1::Transpose,
                        op::util::BroadcastBase,
                        op::util::BinaryElementwiseArithmetic,
                        op::util::UnaryElementwiseArithmetic,
