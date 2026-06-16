@@ -1178,6 +1178,18 @@ GenericLayerParams XmlDeserializer::parse_generic_params(const pugi::xml_node& n
     params.layerId = static_cast<size_t>(pugixml::get_uint64_attr(node, "id"));
     params.version = pugixml::get_str_attr(node, "version");
 
+    // Internal template operations (e.g. ov::op::TypeRelaxed<T>) are serialized with an
+    // "opset" of the form "type_relaxed_<opsetN>" (see get_opset_name() in the serializer
+    // and TypeRelaxedBase::init_rt_info). Such a name is not a registered opset, so reading
+    // the produced IR back used to fail with "unsupported opset: type_relaxed_opsetN"
+    // (CVS-169882). Map the version back to the wrapped operation's real opset so the base
+    // operation is created. The relaxed-type attributes are runtime-only and are re-derived
+    // by plugins during compilation.
+    static const std::string type_relaxed_prefix = "type_relaxed_";
+    if (params.version.rfind(type_relaxed_prefix, 0) == 0) {
+        params.version = params.version.substr(type_relaxed_prefix.size());
+    }
+
     params.type = pugixml::get_str_attr(node, "type");
 
     params.name = pugixml::get_str_attr(node, "name");
