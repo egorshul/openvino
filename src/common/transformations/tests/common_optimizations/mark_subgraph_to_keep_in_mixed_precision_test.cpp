@@ -1413,3 +1413,21 @@ TEST(TransformationTests, ConvertPrecisionKeepFP32RandomUniformTransposePad) {
     OV_ASSERT_NO_THROW(manager.run_passes(model));
     OV_ASSERT_NO_THROW(model->validate_nodes_and_infer_types());
 }
+TEST(TransformationTests, MarkExactIntegerAsFloatSubgraphKeepFP32) {
+    // Integer indices routed through floating point (Convert(i64->f32) -> Reshape ->
+    // Convert(f32->i64)) must be kept in FP32, otherwise FP16 rounding corrupts them.
+    auto idx = make_shared<Parameter>(element::i64, Shape{1, 300});
+    auto to_f = make_shared<Convert>(idx, element::f32);
+    auto shape = Constant::create(element::i64, Shape{3}, {1, 300, 1});
+    auto reshape = make_shared<Reshape>(to_f, shape, false);
+    auto to_i = make_shared<Convert>(reshape, element::i64);
+    auto model = make_shared<Model>(OutputVector{make_shared<Result>(to_i)}, ParameterVector{idx});
+
+    pass::Manager manager;
+    manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+    manager.run_passes(model);
+
+    EXPECT_TRUE(fp16_compression_is_disabled(to_f)) << "Convert(i64->f32) must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(reshape)) << "value-movement in integer bracket must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(to_i)) << "Convert(f32->i64) must be kept in fp32";
+}

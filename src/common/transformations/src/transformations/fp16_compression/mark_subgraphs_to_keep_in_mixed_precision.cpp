@@ -4,6 +4,8 @@
 
 #include "transformations/fp16_compression/mark_subgraphs_to_keep_in_mixed_precision.hpp"
 
+#include <unordered_set>
+
 #include "itt.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/concat.hpp"
@@ -461,6 +463,78 @@ public:
     }
 };
 
+/* Floating-point subgraphs that only carry integer values between a
+ * Convert(integer -> floating point) and a Convert(floating point -> integer)
+ * must be kept in FP32. Such patterns appear, e.g., in detector post-processing
+ * (YOLO NMS): TopK indices -> Convert(i64->f32) -> Reshape/Unsqueeze/Tile ->
+ * Convert(f32->i64) -> Gather. In mixed (FP16) precision the intermediate f16
+ * cannot represent integers above 2048 exactly, so the carried indices get
+ * corrupted (wrong gather results / out-of-range indices).
+ *
+ * Starting from a Convert(float -> int) the matcher walks up through pure
+ * value-movement ops; if every real-typed path terminates at a Convert(int ->
+ * float), the whole bracket (both Converts included) is kept in FP32.
+ */
+class MarkExactIntegerAsFloatSubgraph : public MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("MarkExactIntegerAsFloatSubgraph");
+    MarkExactIntegerAsFloatSubgraph() {
+        MATCHER_SCOPE(MarkExactIntegerAsFloatSubgraph);
+        auto convert_pattern = pattern::wrap_type<v0::Convert>();
+
+        matcher_pass_callback callback = [](pattern::Matcher& m) {
+            const auto& bottom = m.get_match_root();
+            // bottom of the bracket: Convert from floating point to integer
+            if (!bottom->get_output_element_type(0).is_integral_number() ||
+                !bottom->get_input_element_type(0).is_real())
+                return false;
+
+            auto is_value_movement = [](const std::shared_ptr<Node>& n) {
+                return ov::is_type<v1::Reshape>(n.get()) || ov::is_type<v0::Squeeze>(n.get()) ||
+                       ov::is_type<v0::Unsqueeze>(n.get()) || ov::is_type<v1::Transpose>(n.get()) ||
+                       ov::is_type<v0::Tile>(n.get()) || ov::is_type<v0::Concat>(n.get()) ||
+                       ov::is_type<v8::Slice>(n.get()) || ov::is_type<v1::StridedSlice>(n.get()) ||
+                       ov::is_type<v1::Split>(n.get()) || ov::is_type<v1::VariadicSplit>(n.get()) ||
+                       ov::is_type<op::util::BroadcastBase>(n.get()) ||
+                       ov::is_type<op::util::PadBase>(n.get());
+            };
+
+            std::vector<std::shared_ptr<Node>> to_mark;
+            std::vector<std::shared_ptr<Node>> stack{bottom->get_input_node_shared_ptr(0)};
+            std::unordered_set<Node*> visited;
+            while (!stack.empty()) {
+                auto node = stack.back();
+                stack.pop_back();
+                if (!node || !visited.insert(node.get()).second)
+                    continue;
+                // top of the bracket: Convert from integer to floating point
+                if (ov::is_type<v0::Convert>(node.get()) && node->get_input_element_type(0).is_integral_number() &&
+                    node->get_output_element_type(0).is_real()) {
+                    to_mark.push_back(node);
+                    continue;
+                }
+                // any other real-typed producer that is not a pure value-movement op means the
+                // floating-point value is genuine data, not an integer carrier: do not keep in FP32
+                if (!is_value_movement(node))
+                    return false;
+                to_mark.push_back(node);
+                for (const auto& input : node->input_values()) {
+                    if (input.get_element_type().is_real())
+                        stack.push_back(input.get_node_shared_ptr());
+                }
+            }
+
+            if (to_mark.empty())
+                return false;
+            for (const auto& node : to_mark)
+                disable_fp16_compression(node);
+            disable_fp16_compression(bottom);
+            return true;
+        };
+        register_matcher(make_shared<pattern::Matcher>(convert_pattern, matcher_name), callback);
+    }
+};
+
 bool MarkSugraphsToKeepInMixedPrecision::run_on_model(const shared_ptr<ov::Model>& m) {
     RUN_ON_MODEL_SCOPE(MarkSugraphsToKeepInMixedPrecision);
 
@@ -471,6 +545,7 @@ bool MarkSugraphsToKeepInMixedPrecision::run_on_model(const shared_ptr<ov::Model
     REGISTER_PASS(manager, MarkDivWithEps)
     REGISTER_PASS(manager, MarkExpInReduceOpPath)
     REGISTER_PASS(manager, MarkRandomUniform)
+    REGISTER_PASS(manager, MarkExactIntegerAsFloatSubgraph)
     REGISTER_PASS(manager, PropagateDownDisableSensitivityForQuantized)
 
     // both Up and Down propagations are needed.
