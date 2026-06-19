@@ -1167,6 +1167,27 @@ EliminateSliceBeforeGatherElements::EliminateSliceBeforeGatherElements() {
         if (!start_from_zero || !step_is_one)
             return false;
         const auto& gather_node = pattern_to_node.at(gather);
+        const auto gather_elements = ov::as_type_ptr<ov::op::v6::GatherElements>(gather_node);
+        if (!gather_elements)
+            return false;
+        // The slice may be removed only if it does not change any dimension other than the
+        // GatherElements axis. GatherElements requires 'data' and 'indices' to have equal sizes
+        // on every axis except 'axis', so dropping a slice that truncates a non-gather axis
+        // changes the data shape and breaks that constraint (invalid node / wrong result).
+        const auto& in_ps = slice_node->get_input_partial_shape(0);
+        const auto& out_ps = slice_node->get_output_partial_shape(0);
+        if (in_ps.rank().is_dynamic())
+            return false;
+        const auto rank = in_ps.rank().get_length();
+        auto axis = gather_elements->get_axis();
+        if (axis < 0)
+            axis += rank;
+        for (int64_t i = 0; i < rank; ++i) {
+            if (i == axis)
+                continue;
+            if (in_ps[i].is_dynamic() || out_ps[i].is_dynamic() || in_ps[i] != out_ps[i])
+                return false;
+        }
         gather_node->input(0).replace_source_output(slice_node->input_value(0));
         return true;
     };

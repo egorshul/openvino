@@ -94,6 +94,78 @@ TEST_F(IRFrontendTests, elementary_model_reading_v11) {
     EXPECT_TRUE(res.valid) << res.message;
 }
 
+TEST_F(IRFrontendTests, model_reading_with_type_relaxed_opset) {
+    // Internal template ops such as ov::op::TypeRelaxed<T> are serialized with a
+    // synthetic opset name "type_relaxed_<opsetN>" (see get_opset_name() and
+    // TypeRelaxedBase::init_rt_info). Such IRs must be readable back: the base
+    // operation of the corresponding real opset is created. Regression for
+    // "Cannot create ... from unsupported opset: type_relaxed_opset1".
+    std::string testModel = R"V0G0N(
+<net name="Network" version="11">
+    <layers>
+        <layer name="input" type="Parameter" id="0" version="opset1">
+            <data element_type="f32" shape="1,3,22,22"/>
+            <output>
+                <port id="0" precision="FP32">
+                    <dim>1</dim>
+                    <dim>3</dim>
+                    <dim>22</dim>
+                    <dim>22</dim>
+                </port>
+            </output>
+        </layer>
+        <layer name="relaxed_relu" type="ReLU" id="1" version="type_relaxed_opset1">
+            <data type_relax="true" input_data_types="f32" output_data_types="f32"/>
+            <input>
+                <port id="0" precision="FP32">
+                    <dim>1</dim>
+                    <dim>3</dim>
+                    <dim>22</dim>
+                    <dim>22</dim>
+                </port>
+            </input>
+            <output>
+                <port id="1" precision="FP32">
+                    <dim>1</dim>
+                    <dim>3</dim>
+                    <dim>22</dim>
+                    <dim>22</dim>
+                </port>
+            </output>
+        </layer>
+        <layer name="output" type="Result" id="2" version="opset1">
+            <input>
+                <port id="0" precision="FP32">
+                    <dim>1</dim>
+                    <dim>3</dim>
+                    <dim>22</dim>
+                    <dim>22</dim>
+                </port>
+            </input>
+        </layer>
+    </layers>
+    <edges>
+        <edge from-layer="0" from-port="0" to-layer="1" to-port="0"/>
+        <edge from-layer="1" from-port="1" to-layer="2" to-port="0"/>
+    </edges>
+</net>
+)V0G0N";
+
+    std::shared_ptr<ov::Model> model;
+    OV_ASSERT_NO_THROW(model = getWithIRFrontend(testModel));
+    ASSERT_TRUE(!!model);
+
+    // The "type_relaxed_opset1" layer must be created as the base Relu operation.
+    std::shared_ptr<ov::Node> relu;
+    for (const auto& op : model->get_ops()) {
+        if (op->get_friendly_name() == "relaxed_relu")
+            relu = op;
+    }
+    ASSERT_TRUE(!!relu);
+    EXPECT_EQ(std::string("Relu"), std::string(relu->get_type_info().name));
+    EXPECT_EQ(ov::element::f32, relu->get_output_element_type(0));
+}
+
 TEST_F(IRFrontendTests, elementary_model_reading_v11_undefined_precisoin) {
     std::string testModelV11 = R"V0G0N(
 <net name="Network" version="11">

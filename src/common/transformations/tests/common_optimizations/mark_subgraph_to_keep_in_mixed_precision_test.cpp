@@ -1385,3 +1385,78 @@ TEST_F(TransformationTestsF, MarkRandomUniformAsPrecisionSensitive) {
     model_ref = model->clone();
     manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map, empty_fuse_map, true, false, true);
 }
+
+// RandomUniform is precision-sensitive and kept in FP32. Its keep-FP32 mark must
+// propagate through Transpose, otherwise a downstream Pad whose pad_value is a
+// separate FP32 constant becomes inconsistent during FP32->FP16 ConvertPrecision:
+// the scalar pad_value is converted to f16 while the Pad data input stays f32,
+// yielding an invalid graph ("arg_pad element type: f16"). Regression for that.
+TEST(TransformationTests, ConvertPrecisionKeepFP32RandomUniformTransposePad) {
+    using namespace ov::opset10;
+    auto out_shape = v0::Constant::create(element::i64, Shape{4}, {1, 4, 8, 8});
+    auto min_val = v0::Constant::create(element::f32, Shape{}, {0.0f});
+    auto max_val = v0::Constant::create(element::f32, Shape{}, {1.0f});
+    auto random_uniform = make_shared<RandomUniform>(out_shape, min_val, max_val, element::f32);
+    auto order = v0::Constant::create(element::i64, Shape{4}, {0, 2, 3, 1});
+    auto transpose = make_shared<Transpose>(random_uniform, order);
+    auto pads_begin = v0::Constant::create(element::i32, Shape{4}, {0, 0, 0, 0});
+    auto pads_end = v0::Constant::create(element::i32, Shape{4}, {0, 0, 0, 4});
+    auto pad_value = v0::Constant::create(element::f32, Shape{}, {0.0f});
+    auto pad = make_shared<Pad>(transpose, pads_begin, pads_end, pad_value, ov::op::PadMode::CONSTANT);
+    auto res = make_shared<v0::Result>(pad);
+    auto model = make_shared<Model>(OutputVector{res}, ParameterVector{});
+
+    pass::Manager manager;
+    precisions_map fp_convert_precision_map = {{element::f32, element::f16}};
+    type_to_fuse_map empty_fuse_map;
+    manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map, empty_fuse_map, true, false, true);
+    OV_ASSERT_NO_THROW(manager.run_passes(model));
+    OV_ASSERT_NO_THROW(model->validate_nodes_and_infer_types());
+}
+TEST(TransformationTests, MarkExactIntegerAsFloatSubgraphKeepFP32) {
+    // Integer indices routed through floating point (Convert(i64->f32) -> Reshape ->
+    // Convert(f32->i64)) must be kept in FP32, otherwise FP16 rounding corrupts them.
+    auto idx = make_shared<Parameter>(element::i64, Shape{1, 300});
+    auto to_f = make_shared<Convert>(idx, element::f32);
+    auto shape = Constant::create(element::i64, Shape{3}, {1, 300, 1});
+    auto reshape = make_shared<Reshape>(to_f, shape, false);
+    auto to_i = make_shared<Convert>(reshape, element::i64);
+    auto model = make_shared<Model>(OutputVector{make_shared<Result>(to_i)}, ParameterVector{idx});
+
+    pass::Manager manager;
+    manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+    manager.run_passes(model);
+
+    EXPECT_TRUE(fp16_compression_is_disabled(to_f)) << "Convert(i64->f32) must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(reshape)) << "value-movement in integer bracket must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(to_i)) << "Convert(f32->i64) must be kept in fp32";
+}
+
+TEST(TransformationTests, MarkNmsBoxesAndScoresKeepFP32) {
+    // NonMaxSuppression is precision sensitive: rounding its boxes/scores to FP16 changes the
+    // number of selected detections. The NMS node and the ops feeding its boxes (the per-class
+    // offset Add) and scores (the layout Transpose) must be kept in FP32.
+    auto boxes_in = make_shared<Parameter>(element::f32, Shape{1, 100, 4});
+    auto offset = Constant::create(element::f32, Shape{1, 100, 4}, std::vector<float>(400, 4096.0f));
+    auto boxes = make_shared<Add>(boxes_in, offset);  // boxes + class_index * max_coordinate
+
+    auto scores_in = make_shared<Parameter>(element::f32, Shape{1, 100, 1});
+    auto order = Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto scores = make_shared<Transpose>(scores_in, order);  // [1,100,1] -> [1,1,100]
+
+    auto max_out = Constant::create(element::i64, Shape{}, {100});
+    auto iou_thr = Constant::create(element::f32, Shape{}, {0.5f});
+    auto score_thr = Constant::create(element::f32, Shape{}, {0.1f});
+    auto nms = make_shared<NonMaxSuppression>(boxes, scores, max_out, iou_thr, score_thr);
+
+    auto model =
+        make_shared<Model>(OutputVector{make_shared<Result>(nms->output(0))}, ParameterVector{boxes_in, scores_in});
+
+    pass::Manager manager;
+    manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+    manager.run_passes(model);
+
+    EXPECT_TRUE(fp16_compression_is_disabled(nms)) << "NonMaxSuppression must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(boxes)) << "boxes producer (decode Add) must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(scores)) << "scores producer (Transpose) must be kept in fp32";
+}

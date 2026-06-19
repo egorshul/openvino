@@ -425,10 +425,17 @@ elseif(NOT TARGET arm_compute::arm_compute)
 
     # Initialize flags
     set(extra_cxx_flags "${CMAKE_CXX_FLAGS} -Wno-undef")
+    # ACL compiles its bundled C kernels (incl. KleidiAI *.c) with extra_cc_flags,
+    # which otherwise never receives -fPIC. Without it those objects use direct
+    # ADRP relocations against external symbols and fail to link into shared libs
+    # / PIE binaries (e.g. unit tests): "R_AARCH64_ADR_PREL_PG_HI21 ... recompile
+    # with -fPIC". Mirror the C++ handling for C as well.
+    set(extra_cc_flags "${CMAKE_C_FLAGS}")
     if(MSVC64)
         string(REPLACE "/MP " "" extra_cxx_flags "${extra_cxx_flags}")
     elseif(CMAKE_POSITION_INDEPENDENT_CODE)
         set(extra_cxx_flags "${extra_cxx_flags} -fPIC")
+        set(extra_cc_flags "${extra_cc_flags} -fPIC")
     endif()
 
     # Configure platform
