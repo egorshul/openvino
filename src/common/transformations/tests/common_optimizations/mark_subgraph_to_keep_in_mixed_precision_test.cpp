@@ -1431,3 +1431,32 @@ TEST(TransformationTests, MarkExactIntegerAsFloatSubgraphKeepFP32) {
     EXPECT_TRUE(fp16_compression_is_disabled(reshape)) << "value-movement in integer bracket must be kept in fp32";
     EXPECT_TRUE(fp16_compression_is_disabled(to_i)) << "Convert(f32->i64) must be kept in fp32";
 }
+
+TEST(TransformationTests, MarkNmsBoxesAndScoresKeepFP32) {
+    // NonMaxSuppression is precision sensitive: rounding its boxes/scores to FP16 changes the
+    // number of selected detections. The NMS node and the ops feeding its boxes (the per-class
+    // offset Add) and scores (the layout Transpose) must be kept in FP32.
+    auto boxes_in = make_shared<Parameter>(element::f32, Shape{1, 100, 4});
+    auto offset = Constant::create(element::f32, Shape{1, 100, 4}, std::vector<float>(400, 4096.0f));
+    auto boxes = make_shared<Add>(boxes_in, offset);  // boxes + class_index * max_coordinate
+
+    auto scores_in = make_shared<Parameter>(element::f32, Shape{1, 100, 1});
+    auto order = Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto scores = make_shared<Transpose>(scores_in, order);  // [1,100,1] -> [1,1,100]
+
+    auto max_out = Constant::create(element::i64, Shape{}, {100});
+    auto iou_thr = Constant::create(element::f32, Shape{}, {0.5f});
+    auto score_thr = Constant::create(element::f32, Shape{}, {0.1f});
+    auto nms = make_shared<NonMaxSuppression>(boxes, scores, max_out, iou_thr, score_thr);
+
+    auto model =
+        make_shared<Model>(OutputVector{make_shared<Result>(nms->output(0))}, ParameterVector{boxes_in, scores_in});
+
+    pass::Manager manager;
+    manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+    manager.run_passes(model);
+
+    EXPECT_TRUE(fp16_compression_is_disabled(nms)) << "NonMaxSuppression must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(boxes)) << "boxes producer (decode Add) must be kept in fp32";
+    EXPECT_TRUE(fp16_compression_is_disabled(scores)) << "scores producer (Transpose) must be kept in fp32";
+}

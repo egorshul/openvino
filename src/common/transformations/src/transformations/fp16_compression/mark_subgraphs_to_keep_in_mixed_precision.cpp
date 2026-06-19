@@ -20,10 +20,14 @@
 #include "openvino/op/interpolate.hpp"
 #include "openvino/op/less.hpp"
 #include "openvino/op/less_eq.hpp"
+#include "openvino/op/matrix_nms.hpp"
 #include "openvino/op/max_pool.hpp"
 #include "openvino/op/maximum.hpp"
+#include "openvino/op/multiclass_nms.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/mvn.hpp"
+#include "openvino/op/nms_rotated.hpp"
+#include "openvino/op/non_max_suppression.hpp"
 #include "openvino/op/normalize_l2.hpp"
 #include "openvino/op/power.hpp"
 #include "openvino/op/random_uniform.hpp"
@@ -495,8 +499,7 @@ public:
                        ov::is_type<v0::Tile>(n.get()) || ov::is_type<v0::Concat>(n.get()) ||
                        ov::is_type<v8::Slice>(n.get()) || ov::is_type<v1::StridedSlice>(n.get()) ||
                        ov::is_type<v1::Split>(n.get()) || ov::is_type<v1::VariadicSplit>(n.get()) ||
-                       ov::is_type<op::util::BroadcastBase>(n.get()) ||
-                       ov::is_type<op::util::PadBase>(n.get());
+                       ov::is_type<op::util::BroadcastBase>(n.get()) || ov::is_type<op::util::PadBase>(n.get());
             };
 
             std::vector<std::shared_ptr<Node>> to_mark;
@@ -535,6 +538,47 @@ public:
     }
 };
 
+/* NonMaxSuppression (and the related MatrixNms / MulticlassNms / NMSRotated) selects boxes by
+ * comparing scores against a threshold and by the greedy IoU-overlap order. Both decisions are
+ * extremely sensitive to tiny numerical differences: rounding the boxes or scores to FP16 flips
+ * threshold comparisons and the suppression order, so the operation returns a different *number*
+ * of detections than in FP32.
+ *
+ * This is especially severe for detector post-processing that uses the per-class offset trick
+ * (boxes + class_index * max_coordinate) before NMS: the offset pushes coordinates into a range
+ * where the FP16 step is several units, corrupting the geometry that NMS relies on.
+ *
+ * Marking the NMS node disables FP16 compression for it; PropagateUpMarkToKeepInMixedPrecision
+ * then carries the mark up through the value-movement / elementwise ops that produce the boxes and
+ * scores, keeping the whole feeding path in FP32 (propagation naturally stops at heavy ops such as
+ * Convolution / MatMul that are not in propagate_through_ops).
+ */
+class MarkNms : public MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("MarkNms");
+    MarkNms() {
+        MATCHER_SCOPE(MarkNms);
+        auto nms_pattern = pattern::wrap_type<ov::op::v1::NonMaxSuppression,
+                                              ov::op::v3::NonMaxSuppression,
+                                              ov::op::v4::NonMaxSuppression,
+                                              ov::op::v5::NonMaxSuppression,
+                                              ov::op::v9::NonMaxSuppression,
+                                              ov::op::v13::NMSRotated,
+                                              ov::op::v8::MatrixNms,
+                                              ov::op::v8::MulticlassNms,
+                                              ov::op::v9::MulticlassNms>();
+
+        matcher_pass_callback callback = [](pattern::Matcher& m) {
+            const auto& node = m.get_match_root();
+            if (!node)
+                return false;
+            disable_fp16_compression(node);
+            return true;
+        };
+        register_matcher(make_shared<pattern::Matcher>(nms_pattern, matcher_name), callback);
+    }
+};
+
 bool MarkSugraphsToKeepInMixedPrecision::run_on_model(const shared_ptr<ov::Model>& m) {
     RUN_ON_MODEL_SCOPE(MarkSugraphsToKeepInMixedPrecision);
 
@@ -546,6 +590,7 @@ bool MarkSugraphsToKeepInMixedPrecision::run_on_model(const shared_ptr<ov::Model
     REGISTER_PASS(manager, MarkExpInReduceOpPath)
     REGISTER_PASS(manager, MarkRandomUniform)
     REGISTER_PASS(manager, MarkExactIntegerAsFloatSubgraph)
+    REGISTER_PASS(manager, MarkNms)
     REGISTER_PASS(manager, PropagateDownDisableSensitivityForQuantized)
 
     // both Up and Down propagations are needed.
